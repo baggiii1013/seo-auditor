@@ -15,6 +15,8 @@ const GRADE_COLOR: Record<string, string> = {
 const ghost =
   'rounded-lg border border-line bg-white px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
 
+const slug = (area: string) => `area-${area.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
 const download = (name: string, body: BlobPart, type: string) => {
   const url = URL.createObjectURL(new Blob([body], { type }));
   const a = document.createElement('a');
@@ -83,12 +85,30 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   );
 }
 
-function Areas({ areas }: { areas: NonNullable<Report['score']['areas']> }) {
+/** Only the areas that actually produced a section can be linked. The score's
+ *  area names and the causes' are not the same vocabulary — "AI & answer
+ *  engines" is a cause area with no scored row — so the linkable set is passed
+ *  in rather than guessed from `failed > 0`. */
+function Areas({
+  areas,
+  linked,
+}: {
+  areas: NonNullable<Report['score']['areas']>;
+  linked: Set<string>;
+}) {
   const worst = Math.max(...areas.map((a) => a.lost), 1);
   return (
     <div className="space-y-2.5">
-      {areas.map((area) => (
-        <div key={area.name} className="grid grid-cols-[9rem_1fr_auto] items-center gap-3 text-sm">
+      {areas.map((area) => {
+        const Row = linked.has(area.name) ? 'a' : 'div';
+        return (
+        <Row
+          key={area.name}
+          {...(linked.has(area.name) ? { href: `#${slug(area.name)}` } : {})}
+          className={`grid grid-cols-[9rem_1fr_auto] items-center gap-3 rounded-lg text-sm ${
+            linked.has(area.name) ? 'transition-colors duration-150 ease-out hover:bg-ink/[0.04]' : ''
+          }`}
+        >
           <div className="truncate font-medium text-ink/80">{area.name}</div>
           <div className="h-2 overflow-hidden rounded-full bg-ink/8">
             <div
@@ -104,9 +124,51 @@ function Areas({ areas }: { areas: NonNullable<Report['score']['areas']> }) {
               {area.passed}/{area.passed + area.failed}
             </span>
           </div>
-        </div>
-      ))}
+        </Row>
+        );
+      })}
     </div>
+  );
+}
+
+/** Pins once you scroll past the score, which is exactly when the headline
+ *  numbers leave the screen and a long report stops telling you where you are.
+ *  Plain anchors: the browser already does the scrolling, the back button
+ *  already undoes it. */
+function Jump({
+  score,
+  grade,
+  areas,
+}: {
+  score: number | null;
+  grade: string | null;
+  areas: [string, Cause[]][];
+}) {
+  if (areas.length < 2) return null;
+  return (
+    <nav
+      aria-label="Jump to an area"
+      className="chrome sticky top-3 z-10 flex items-center gap-2 overflow-x-auto rounded-full border border-line px-4 py-2 shadow-sm"
+    >
+      {score !== null && (
+        <>
+          <span className="t-num shrink-0 text-sm font-semibold">
+            {score}
+            <span className="ml-1 text-ink/40">{grade}</span>
+          </span>
+          <span className="h-4 w-px shrink-0 bg-line" />
+        </>
+      )}
+      {areas.map(([area, list]) => (
+        <a
+          key={area}
+          href={`#${slug(area)}`}
+          className="t-eyebrow shrink-0 rounded-full px-2.5 py-1.5 text-ink/55 transition-colors duration-150 ease-out hover:bg-ink/[0.06] hover:text-ink"
+        >
+          {area} <span className="t-num ml-0.5 text-ink/35">{list.length}</span>
+        </a>
+      ))}
+    </nav>
   );
 }
 
@@ -182,7 +244,7 @@ function Collapsible({
           ›
         </span>
       </button>
-      {open && <div className="border-t border-line px-5 py-4">{children}</div>}
+      {open && <div className="enter-fade border-t border-line px-5 py-4">{children}</div>}
     </section>
   );
 }
@@ -243,7 +305,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
   ];
 
   return (
-    <div className="space-y-6">
+    <div className="enter-up space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="t-title">{host}</h2>
@@ -274,16 +336,18 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
         )}
       </section>
 
+      <Jump score={score.score} grade={score.grade ?? '—'} areas={byArea} />
+
       {score.areas && score.areas.length > 0 && (
         <section className="card p-6">
           <h3 className="t-eyebrow mb-4 text-ink/45">Points lost by area</h3>
-          <Areas areas={score.areas} />
+          <Areas areas={score.areas} linked={new Set(byArea.map(([area]) => area))} />
         </section>
       )}
 
       {byArea.length > 0 ? (
         byArea.map(([area, list]) => (
-          <section key={area} className="space-y-3">
+          <section key={area} id={slug(area)} className="scroll-mt-20 space-y-3">
             <h3 className="t-eyebrow text-ink/45">{area}</h3>
             {list.map((cause) => (
               <CauseCard key={cause.id} cause={cause} />
@@ -291,7 +355,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
           </section>
         ))
       ) : (
-        <section className="rounded-2xl border border-emerald-500/25 bg-emerald-50 p-6 text-emerald-800">
+        <section className="enter-scale rounded-2xl border border-emerald-500/25 bg-emerald-50 p-6 text-emerald-800">
           Nothing to fix. Every check that applied to this run passed.
         </section>
       )}

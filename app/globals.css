@@ -35,6 +35,34 @@ body {
   color: var(--color-ink);
 }
 
+/* Anchor jumps in a long report. Gated, because a smooth scroll across ten
+   thousand pixels is exactly the vestibular motion the setting asks to drop. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
+}
+
+/* Floating chrome: a translucent layer the report scrolls under, rather than an
+   opaque strip that eats a band of the viewport. */
+.chrome {
+  background: rgb(255 255 255 / 0.84);
+  backdrop-filter: blur(24px) saturate(180%);
+}
+
+@supports not (backdrop-filter: blur(1px)) {
+  .chrome {
+    background: #fff;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .chrome {
+    background: #fff;
+    backdrop-filter: none;
+  }
+}
+
 /* Tracking is size-specific: one letter-spacing for the whole page is wrong
    somewhere. Large text tightens as it grows, body sits near zero, and the
    small caps open up to stay legible. Leading moves the other way. */
@@ -134,5 +162,49 @@ body {
 @starting-style {
   .log-line {
     opacity: 0;
+  }
+}
+
+/* Entrance animations for conditional renders. CSS @starting-style so they
+   need no JS, no library, and no exit animation (instant exit is correct for
+   every use — the user asked it to go). */
+.enter-fade {
+  transition: opacity 150ms var(--ease-out);
+}
+
+.enter-up {
+  transition:
+    opacity 250ms var(--ease-out),
+    transform 250ms var(--ease-out);
+}
+
+.enter-scale {
+  transition:
+    opacity 300ms var(--ease-out),
+    transform 300ms var(--ease-out);
+}
+
+@starting-style {
+  .enter-fade {
+    opacity: 0;
+  }
+  .enter-up {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  .enter-scale {
+    opacity: 0;
+    transform: scale(0.97);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .enter-up {
+    transition: opacity 200ms ease;
+    transform: none;
+  }
+  .enter-scale {
+    transition: opacity 200ms ease;
+    transform: none;
   }
 }

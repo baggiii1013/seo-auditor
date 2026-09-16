@@ -381,7 +381,7 @@ export default function Auditor({ fields, agents }: { fields: Field[]; agents: A
         </button>
 
         {advanced && (
-          <div className="mt-5 grid gap-5 border-t border-line pt-5 sm:grid-cols-2">
+          <div className="enter-fade mt-5 grid gap-5 border-t border-line pt-5 sm:grid-cols-2">
             {fields.map((field) => (
               <Control
                 key={field.query}

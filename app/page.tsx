@@ -1,7 +1,7 @@
-import { formFields, notInApp } from '@/engine/src/options.mjs';
-import { BROWSER_NAMES, OS_NAMES } from '@/engine/src/agents.mjs';
+import { formFields, notInApp } from "@/engine/src/options.mjs";
+import { BROWSER_NAMES, OS_NAMES } from "@/engine/src/agents.mjs";
 
-import Auditor from './auditor';
+import Auditor from "./auditor";
 
 // The controls are not hard-coded. `formFields()` is the engine's own table of
 // every flag and whether a window should reach it — the authors wrote it so a
@@ -22,7 +22,7 @@ export default function Home() {
         </h1>
         <p className="t-lead mt-3 max-w-xl text-ink/60">
           Crawls a site&rsquo;s sitemap and checks every page — metadata, structured data, links,
-          images, redirects and site-wide config. It will not tell you how you rank.
+          images, redirects and site-wide config.
         </p>
       </header>
 
@@ -33,8 +33,8 @@ export default function Home() {
           What this window does not reach ({missing.length})
         </summary>
         <p className="mt-3 text-xs text-ink/50">
-          Straight from the engine&rsquo;s own table. A missing control reads exactly like a
-          passing one, so each says why.
+          Straight from the engine&rsquo;s own table. A missing control reads exactly like a passing
+          one, so each says why.
         </p>
         <ul className="mt-4 space-y-2 text-sm">
           {missing.map(({ flag, reason }) => (
@@ -47,14 +47,7 @@ export default function Home() {
       </details>
 
       <footer className="mt-10 text-xs leading-relaxed text-ink/40">
-        Engine vendored from{' '}
-        <a
-          href="https://github.com/nurkamol/seo-audit"
-          className="underline underline-offset-2 transition-colors duration-150 ease-out hover:text-brand"
-        >
-          nurkamol/seo-audit
-        </a>{' '}
-        — see engine/UPSTREAM.txt. Runs are kept on this machine; list them with{' '}
+        — see engine/UPSTREAM.txt. Runs are kept on this machine; list them with{" "}
         <code className="font-mono">seo-audit --reports</code>.
       </footer>
     </main>
