@@ -1,0 +1,238 @@
+name: Full-site SEO Audit
+description: Crawl a sitemap and check every page for SEO, metadata and structured-data problems that single-page graders miss
+author: nurkamol
+
+branding:
+  icon: search
+  color: orange
+
+inputs:
+  url:
+    description: Site to audit, or a sitemap URL
+    required: true
+  baseline:
+    description: >
+      Path to a committed baseline file. When set, only findings new since that
+      baseline fail the run — the backlog you already know about is tolerated.
+    required: false
+  fail-on:
+    description: 'error | warn | new | never'
+    required: false
+    default: error
+  config:
+    description: Path to seo-audit.config.json
+    required: false
+  limit:
+    description: Maximum pages to crawl
+    required: false
+  psi:
+    description: >
+      Comma-separated pages to measure with PageSpeed Insights. Slow (~12s
+      each). A path glob names a section — /journal/** is every crawled page
+      under it, sampled. Set the PSI_API_KEY env var from a secret to lift the
+      quota.
+    required: false
+  search-console:
+    description: >
+      Order findings by what the pages actually do in Google. The property
+      exactly as Search Console names it — a domain property is
+      "sc-domain:example.com", not a URL. Needs GSC_CLIENT_ID,
+      GSC_CLIENT_SECRET and GSC_REFRESH_TOKEN in the environment, from secrets;
+      get them once with --search-console-login on a machine with a browser.
+      See docs/search-console.md.
+    required: false
+  check-external:
+    description: >
+      Also check links pointing off the site. Off by default because other
+      people's servers rate-limit and bot-block; only a 404, a 410 or no answer
+      at all is ever reported. Set to any non-empty value.
+    required: false
+  hosts:
+    description: >
+      Also audit the rest of the domain. Asks certificate transparency what
+      other hosts exist, resolves them, and fetches the ones that are live —
+      a staging copy open to the index, a subdomain whose CNAME points at a
+      service that is gone, a second host serving the same site. Off by default
+      because it is one slow third-party lookup plus one per candidate host.
+      Set to any non-empty value.
+    required: false
+  verbose:
+    description: >
+      Log every request as it happens. Useful when a run is slow or a site
+      stalls and the job log is all you have to go on. Set to any non-empty
+      value.
+    required: false
+  psi-sample:
+    description: >
+      Pages measured per section glob (default 3). The report says how many of
+      the matched pages were left unmeasured, so a sample never reads as a
+      clean bill of health for the whole section.
+    required: false
+  settle:
+    description: >
+      Seconds to wait for a deploy to reach every edge before crawling. A CDN
+      serves a fresh deploy unevenly for a minute or two, and auditing during
+      the rollout produces a snapshot that is wrong in a confusing way.
+    required: false
+  browser:
+    description: >
+      Crawl as a real browser or a search crawler instead of as this tool:
+      chrome, firefox, safari, edge, googlebot, googlebot-desktop, bingbot.
+      Googlebot is what Google is served, which is not always what a person
+      gets; a browser is what a host blocking crawlers will answer at all.
+    required: false
+  os:
+    description: >
+      The system that browser is running on — macos, windows, linux, android,
+      ios. Defaults to the runner's. Ignored for the crawlers, whose user agent
+      names no machine.
+    required: false
+  report:
+    description: Where to write the HTML report
+    required: false
+    default: seo-audit.html
+  json:
+    description: Where to write the JSON report
+    required: false
+    default: seo-audit.json
+  csv:
+    description: >
+      Where to write the findings as a spreadsheet, one row per finding. Off
+      unless a path is given.
+    required: false
+  write-sitemap:
+    description: >
+      Where to write the sitemap this site should have had — every page that
+      answered 200, is HTML, is indexable and is its own canonical. Refuses on
+      a crawl that did not see the whole site rather than writing a short one.
+      Off unless a path is given.
+    required: false
+  write-llms:
+    description: >
+      Where to write the llms.txt this site should have had, in the
+      llmstxt.org format, from the site's own titles and descriptions. Refuses
+      on a partial crawl for the same reason as write-sitemap. Off unless a
+      path is given.
+    required: false
+  write-schema:
+    description: >
+      Where to write the JSON-LD this site could add — WebSite, Organization
+      and BreadcrumbList, built only from strings the crawl actually read. Off
+      unless a path is given.
+    required: false
+  comment:
+    description: Post the findings as a sticky comment on the pull request
+    required: false
+    default: 'false'
+  github-token:
+    description: Token used to post the PR comment
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  errors:
+    description: Number of error-level findings
+    value: ${{ steps.run.outputs.errors }}
+  warnings:
+    description: Number of warning-level findings
+    value: ${{ steps.run.outputs.warnings }}
+  notes:
+    description: Number of info-level findings
+    value: ${{ steps.run.outputs.notes }}
+  pages:
+    description: Number of pages crawled
+    value: ${{ steps.run.outputs.pages }}
+  report:
+    description: Path to the HTML report
+    value: ${{ inputs.report }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+
+    - id: run
+      shell: bash
+      env:
+        # Runs the code shipped with *this* version of the action, not whatever
+        # is on main — otherwise pinning @v1 would pin nothing.
+        SEO_AUDIT_BIN: ${{ github.action_path }}/bin/seo-audit.mjs
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_BASELINE: ${{ inputs.baseline }}
+        INPUT_CONFIG: ${{ inputs.config }}
+        INPUT_LIMIT: ${{ inputs.limit }}
+        INPUT_PSI: ${{ inputs.psi }}
+        INPUT_PSI_SAMPLE: ${{ inputs.psi-sample }}
+        INPUT_VERBOSE: ${{ inputs.verbose }}
+        INPUT_CHECK_EXTERNAL: ${{ inputs.check-external }}
+        INPUT_HOSTS: ${{ inputs.hosts }}
+        INPUT_SETTLE: ${{ inputs.settle }}
+        INPUT_BROWSER: ${{ inputs.browser }}
+        INPUT_OS: ${{ inputs.os }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_REPORT: ${{ inputs.report }}
+        INPUT_JSON: ${{ inputs.json }}
+        INPUT_CSV: ${{ inputs.csv }}
+      run: |
+        args=("$INPUT_URL" --html "$INPUT_REPORT" --json "$INPUT_JSON" --fail-on "$INPUT_FAIL_ON")
+        [ -n "$INPUT_BASELINE" ] && args+=(--baseline "$INPUT_BASELINE")
+        [ -n "$INPUT_CONFIG" ]   && args+=(--config "$INPUT_CONFIG")
+        [ -n "$INPUT_LIMIT" ]    && args+=(--limit "$INPUT_LIMIT")
+        [ -n "$INPUT_PSI" ]      && args+=(--psi "$INPUT_PSI")
+        [ -n "$INPUT_PSI_SAMPLE" ] && args+=(--psi-sample "$INPUT_PSI_SAMPLE")
+        [ -n "$INPUT_SEARCH_CONSOLE" ] && args+=(--search-console "$INPUT_SEARCH_CONSOLE")
+        [ -n "$INPUT_VERBOSE" ]  && args+=(--verbose)
+        [ -n "$INPUT_CHECK_EXTERNAL" ] && args+=(--check-external)
+        [ -n "$INPUT_HOSTS" ]    && args+=(--hosts)
+        [ -n "$INPUT_SETTLE" ]   && args+=(--settle "$INPUT_SETTLE")
+        [ -n "$INPUT_BROWSER" ]  && args+=(--browser "$INPUT_BROWSER")
+        [ -n "$INPUT_OS" ]       && args+=(--os "$INPUT_OS")
+        [ -n "$INPUT_CSV" ]      && args+=(--csv "$INPUT_CSV")
+        [ -n "$INPUT_WRITE_SITEMAP" ] && args+=(--write-sitemap "$INPUT_WRITE_SITEMAP")
+        [ -n "$INPUT_WRITE_LLMS" ] && args+=(--write-llms "$INPUT_WRITE_LLMS")
+        [ -n "$INPUT_WRITE_SCHEMA" ] && args+=(--write-schema "$INPUT_WRITE_SCHEMA")
+
+        node "$SEO_AUDIT_BIN" "${args[@]}"
+        status=$?
+
+        node -e '
+          const fs = require("fs");
+          const d = JSON.parse(fs.readFileSync(process.env.INPUT_JSON, "utf8"));
+          const n = (l) => d.findings.filter((f) => f.level === l).length;
+          fs.appendFileSync(process.env.GITHUB_OUTPUT,
+            `errors=${n("error")}\nwarnings=${n("warn")}\nnotes=${n("info")}\npages=${d.meta.pages}\n`);
+
+          const icon = { error: "🔴", warn: "🟡", info: "🔵" };
+          const rows = d.findings
+            .map((f) => `| ${icon[f.level]} | ${f.title} | ${f.url ? `<${f.url}>` : ""} |`)
+            .join("\n");
+          const body =
+            `## SEO audit — ${d.meta.origin}\n\n` +
+            `**${n("error")}** errors · **${n("warn")}** warnings · **${n("info")}** notes ` +
+            `across ${d.meta.pages} pages\n\n` +
+            (d.findings.length ? `| | Finding | Page |\n|:-:|---|---|\n${rows}\n` : "Nothing to report. ✅\n");
+
+          fs.writeFileSync("seo-audit-comment.md", body);
+          if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, body);
+        '
+        exit $status
+
+    # Sticky: edits its own previous comment instead of adding one per push.
+    - if: ${{ always() && inputs.comment == 'true' && github.event_name == 'pull_request' }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+      run: |
+        marker="<!-- seo-audit -->"
+        body="$marker"$'\n'"$(cat seo-audit-comment.md)"
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" --jq \
+          "[.[] | select(.body | startswith(\"$marker\")) | .id] | first // empty")
+        if [ -n "$existing" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" -f body="$body" >/dev/null
+        else
+          gh api -X POST "repos/$REPO/issues/$PR/comments" -f body="$body" >/dev/null
+        fi

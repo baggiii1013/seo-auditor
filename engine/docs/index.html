@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>seo-audit — every page, not just the homepage</title>
+<meta name="description" content="A zero-dependency CLI, GitHub Action and desktop app for macOS, Windows and Linux that crawls a site's sitemap and checks every page for the SEO, metadata and structured-data problems single-page graders miss.">
+<link rel="icon" href="icon.png">
+<link rel="apple-touch-icon" href="icon.png">
+<meta property="og:title" content="seo-audit">
+<meta property="og:description" content="Every page, not just the homepage. Zero dependencies, one command, works in CI.">
+<meta property="og:image" content="https://nurkamol.github.io/seo-audit/shots/app.png">
+<meta property="og:type" content="website">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff; --fg: #111827; --muted: #4b5563; --line: #e5e7eb;
+    --panel: #fafafa; --brand: #ea580c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0d0f14; --fg: #f3f4f6; --muted: #9ca3af; --line: #1f2530; --panel: #12151c; }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 16px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* The column, and the air around it. `padding-inline` rather than the
+     `padding` shorthand: `.wrap` outranks `header`/`section`/`footer`, so a
+     shorthand here silently zeroed every block's top and bottom padding and the
+     whole page ran together. `clamp` so a phone gets 1.25rem and a desktop gets
+     a margin you can see; `max` so a notch never eats it. */
+  .wrap {
+    max-width: 52rem;
+    margin-inline: auto;
+    padding-left: max(clamp(1.25rem, 5vw, 3rem), env(safe-area-inset-left));
+    padding-right: max(clamp(1.25rem, 5vw, 3rem), env(safe-area-inset-right));
+  }
+  a { color: var(--brand); text-underline-offset: 2px; }
+
+  header { padding: 5.5rem 0 4rem; text-align: center; border-bottom: 1px solid var(--line); }
+  /* Scoped to the logo on purpose. As `header img` it also matched the badges,
+     and an `auto` margin on a flex item absorbs the free space — which spread
+     four badges across the whole column with `justify-content: center` still
+     computing to `center`. */
+  header .logo { border-radius: 22px; display: block; margin: 0 auto; }
+  h1 {
+    font-size: clamp(2rem, 5.5vw, 2.9rem); line-height: 1.08;
+    letter-spacing: -.025em; margin: 1.5rem 0 .75rem;
+  }
+  .tagline { font-size: clamp(1rem, 2.2vw, 1.16rem); color: var(--muted); margin: 0 auto 2.25rem; max-width: 33rem; }
+  .badges { display: flex; gap: .4rem; justify-content: center; flex-wrap: wrap; margin-bottom: 2.25rem; }
+  /* `width: auto` matters: with only a height set, a shields.io SVG keeps its
+     intrinsic width and the row spreads itself across the page. */
+  .badges a { display: inline-flex; }
+  .badges img { height: 20px; width: auto; display: block; }
+  header pre { text-align: left; max-width: 40rem; margin: 0 auto; }
+  header .quiet { margin-top: .9rem; }
+
+  pre {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 1rem 1.1rem; overflow-x: auto;
+    font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  code { font: 13.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  p code, li code, td code { background: var(--panel); padding: .1rem .35rem; border-radius: 4px; }
+
+  section { padding: 3.5rem 0; border-top: 1px solid var(--line); }
+  section:first-of-type { border-top: 0; }
+  section > *:last-child { margin-bottom: 0; }
+  h2 { font-size: clamp(1.25rem, 3vw, 1.5rem); letter-spacing: -.018em; margin: 0 0 .6rem; }
+  .lede { color: var(--muted); margin: 0 0 1.6rem; max-width: 44rem; }
+
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
+  .card {
+    border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.2rem 1.3rem; background: var(--panel);
+    /* So a download button can sit on the card's floor rather than wherever
+       its neighbour's sentence happened to stop. */
+    display: flex; flex-direction: column;
+  }
+  .card h3, .card h4 { margin: 0 0 .35rem; font-size: 1rem; }
+  .card p { margin: 0; color: var(--muted); font-size: .92rem; }
+  /* A card that offers a download needs air between the sentence and the
+     button. `.row` was defined only inside `.callout`, so without this the
+     button sits flush against the text it belongs to. */
+  .card .row { display: flex; flex-wrap: wrap; gap: .6rem; margin: auto 0 0; padding-top: .9rem; }
+  .card p + p { margin-top: .6rem; }
+
+  /* Screenshots. A border rather than a shadow, because the app's own window
+     already has one and two would look like a sticker. */
+  .shot { margin: 0; }
+  .shot img {
+    display: block; width: 100%; height: auto;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+  }
+  .shot figcaption { margin-top: .5rem; color: var(--muted); font-size: .85rem; }
+  .shot.wide { margin-bottom: 1.25rem; }
+  .shots { display: grid; gap: 1.25rem; grid-template-columns: 1.3fr 1fr; align-items: start; }
+  /* A tall portrait window has no business being full width. */
+  /* The settings window is landscape now — a sidebar and a pane — so it takes
+     the full column rather than a narrow one meant for a tall form. */
+  .settings-row { margin-top: 1.25rem; grid-template-columns: 1fr; align-items: start; }
+  .settings-row figcaption { margin-top: 0; }
+  @media (max-width: 34rem) { .settings-row { grid-template-columns: 1fr; } }
+  @media (max-width: 34rem) { .shots { grid-template-columns: 1fr; } }
+
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: .93rem; min-width: 30rem; }
+  th, td { text-align: left; padding: .7rem .75rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td:first-child { white-space: nowrap; }
+  th { font-size: .78rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 600; }
+
+  /* The one thing on the page aimed at somebody who does not want a terminal,
+     so it is the one thing that gets a border and a button. */
+  .callout {
+    margin: 2.75rem auto 0; max-width: 40rem; text-align: left;
+    border: 1px solid var(--line); border-radius: 14px;
+    padding: 1.4rem 1.5rem; background: var(--panel);
+  }
+  .callout h2 { font-size: 1.05rem; margin: 0 0 .5rem; }
+  .callout p { margin: 0 0 .9rem; color: var(--muted); font-size: .94rem; }
+  .callout .row { display: flex; flex-wrap: wrap; gap: .6rem; margin: 0; }
+  .button {
+    display: inline-block; text-decoration: none; font-size: .9rem; font-weight: 500;
+    padding: .5rem .95rem; border-radius: 8px;
+    background: var(--brand); color: #fff; border: 1px solid transparent;
+  }
+  .quiet-button { background: transparent; color: var(--muted); border-color: var(--line); }
+
+  /* A command is there to be run, which means it is there to be copied. The
+     button is added by script, so a page without JavaScript shows the command
+     and no dead control rather than a button that does nothing. */
+  .command { position: relative; }
+  .command .copy {
+    position: absolute; top: .5rem; right: .5rem;
+    font: 500 11px/1 ui-sans-serif, system-ui, sans-serif;
+    color: var(--muted); background: var(--bg);
+    border: 1px solid var(--line); border-radius: 6px;
+    padding: .35rem .55rem; cursor: pointer;
+    opacity: 0; transition: opacity .15s ease, color .15s ease, border-color .15s ease;
+  }
+  /* Shown on hover and on keyboard focus — a control only a mouse can find is
+     a control some people do not have. */
+  .command:hover .copy, .command .copy:focus-visible { opacity: 1; }
+  .command .copy:hover { color: var(--fg); border-color: var(--muted); }
+  .command .copy[data-done] { opacity: 1; color: #16a34a; border-color: #16a34a; }
+  /* Coarse pointers have no hover at all, so it stays visible there. */
+  @media (hover: none) { .command .copy { opacity: 1; } }
+
+  .quiet { color: var(--muted); font-size: .9rem; }
+  footer { padding: 3rem 0 4.5rem; color: var(--muted); font-size: .9rem; text-align: center; border-top: 1px solid var(--line); }
+
+  /* A phone is where a link like this is opened first. */
+  @media (max-width: 40rem) {
+    header { padding: 3.5rem 0 2.5rem; }
+    section { padding: 2.5rem 0; }
+    pre { font-size: 12px; padding: .85rem .9rem; }
+  }
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <img class="logo" src="icon.png" alt="" width="96" height="96">
+  <h1>Every page, not just the homepage</h1>
+  <p class="tagline">
+    A crawler that reads a site's whole sitemap and checks each page for the SEO,
+    metadata and structured-data problems that single-URL graders cannot see.
+  </p>
+  <div class="badges">
+    <a href="https://github.com/nurkamol/seo-audit/releases"><img src="https://img.shields.io/github/v/release/nurkamol/seo-audit?color=ea580c" alt="latest release"></a>
+    <a href="https://www.npmjs.com/package/@nurkamol/seo-audit"><img src="https://img.shields.io/npm/v/%40nurkamol%2Fseo-audit?color=cb3837&amp;label=npm" alt="on npm"></a>
+    <img src="https://img.shields.io/badge/dependencies-0-brightgreen" alt="zero dependencies">
+    <img src="https://img.shields.io/badge/node-%E2%89%A518-3c873a" alt="node 18 or newer">
+    <a href="https://github.com/nurkamol/seo-audit/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT"></a>
+  </div>
+  <pre class="command"><code>npx @nurkamol/seo-audit https://example.com</code></pre>
+  <p class="quiet">
+    Nothing to install. Node 18 or newer, and no dependencies at all. Or run it straight
+    from the repository, pinned to a major version:
+    <code>npx github:nurkamol/seo-audit@v1</code> — same tool, though that one clones 16 MB
+    of app sources and tests to get at a 115 kB crawler.
+  </p>
+
+  <aside class="callout">
+    <h2>Not a terminal person? There is a window.</h2>
+    <p>
+      <b>SEO Audit</b> is the same tool with a window instead of a prompt: type a domain,
+      press return, and read the report as cards you can expand, filter and search. No flags
+      to learn, and nothing leaves your machine. macOS, Windows and Linux.
+    </p>
+    <p class="row">
+      <a class="button" href="#app">Download the app</a>
+      <a class="button quiet-button" href="https://github.com/nurkamol/seo-audit/releases/latest">All releases</a>
+    </p>
+  </aside>
+</header>
+
+<section class="wrap">
+  <h2>Why it exists</h2>
+  <p class="lede">
+    It was written after three commercial graders all called a client's homepage healthy
+    while the language switcher on every translated article linked to a 404 — a bug none
+    of them could see, because it was only wrong on pages they never opened.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h3>Ninety-odd checks</h3>
+      <p>Indexability, canonicals, headings, structured data, hreflang, images, links,
+         sitemaps, redirects and the certificate.</p>
+    </div>
+    <div class="card">
+      <h3>No false positives</h3>
+      <p>A check that cries wolf gets the whole report ignored. Anything sometimes
+         legitimate is a note, never an error.</p>
+    </div>
+    <div class="card">
+      <h3>Performance is never estimated</h3>
+      <p>A fetch loop cannot see rendering. <code>--psi</code> asks Google for Google's
+         own measurement instead of guessing.</p>
+    </div>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>What it looks like</h2>
+  <p class="lede">
+    Nothing here is a mock-up. The app is a real window, the report is a real report, the PDF
+    came out of the app's export, and the numbers are a real crawl of a real site.
+  </p>
+  <figure class="shot wide">
+    <img src="shots/app.png" alt="The macOS app showing a real audit of astro.build: 60 pages, 232 findings, 37 things to change, scored 87 out of 100, worst first"
+         width="1640" height="1054" loading="lazy">
+    <figcaption>
+      A real run against astro.build. 232 findings are 37 things to change, worst first, scored
+      87 — and the one error at the top is a link to a page that does not exist, which is the
+      bug this tool was written to catch.
+    </figcaption>
+  </figure>
+  <figure class="shot wide">
+    <img src="shots/compare.png" alt="The compare sheet: docs.astro.build against astro.build, showing 26 findings that appeared"
+         width="1640" height="1054" loading="lazy">
+    <figcaption>
+      Compare two runs — a site against itself last week, or one property against another.
+      Findings that appeared come first, because those are the ones somebody just introduced.
+      Different hosts are matched by path.
+    </figcaption>
+  </figure>
+  <div class="shots">
+    <figure class="shot">
+      <img src="shots/report.jpg" alt="The HTML report, opening with the eight widest things to change"
+           width="1400" height="855" loading="lazy">
+      <figcaption>The HTML report opens with the work, not the findings.</figcaption>
+    </figure>
+    <figure class="shot">
+      <img src="shots/pdf.png" alt="The first page of an exported PDF report"
+           width="707" height="620" loading="lazy">
+      <figcaption>Exported as PDF, with every affected page.</figcaption>
+    </figure>
+  </div>
+  <div class="shots settings-row">
+    <figure class="shot">
+      <img src="shots/settings.png" alt="The app's settings: a sidebar of nine panes — crawl, coverage, identify as, performance, Search Console, silenced, reports, updates and help"
+           width="1480" height="1144" loading="lazy">
+    </figure>
+    <p class="lede">
+      Settings: nine panes, laid out the way macOS lays out System Settings. <b>Gentle</b> is one
+      connection at a time — the setting that gets through a site answering 429. Anything left at
+      its default is not sent, so the engine's defaults stay in the engine.
+    </p>
+  </div>
+</section>
+
+<section class="wrap">
+  <h2>It tells you what to change, not what it found</h2>
+  <p class="lede">
+    A real store produced 2,081 findings across 347 URLs. That is not 2,081 problems — it
+    is one product template repeated 194 times. Every report opens with the work, ordered
+    worst first and then by how much of the site points at it.
+  </p>
+  <pre><code>✗  No &lt;h1&gt;                              10 pages under /pages/
+✗  Structured data is not valid JSON     3 pages under /collections/
+!  Heading level jumps from h1 to h3    225 pages under /products/, 69% of the crawl
+!  Title may be truncated in results    162 pages under /products/</code></pre>
+</section>
+
+<section class="wrap">
+  <h2>Four ways to run it</h2>
+  <div class="scroll">
+  <table>
+    <tr><th>Where</th><th>How</th></tr>
+    <tr>
+      <td><b>Terminal</b></td>
+      <td><code>npx @nurkamol/seo-audit https://example.com</code><br>
+        <span class="quiet">Reports as terminal output, Markdown, HTML, JSON or CSV.
+        <code>npm i -g @nurkamol/seo-audit</code> if you would rather type
+        <code>seo-audit</code>.</span></td>
+    </tr>
+    <tr>
+      <td><b>CI</b></td>
+      <td><code>uses: nurkamol/seo-audit@v1</code><br>
+        <span class="quiet">Fails a build on regressions only, and comments on the pull request.</span></td>
+    </tr>
+    <tr>
+      <td><b>A window</b></td>
+      <td><code>brew install --cask seo-audit</code><br>
+        <span class="quiet">SEO Audit — a native report, no limits, nothing leaves the machine.</span></td>
+    </tr>
+    <tr>
+      <td><b>Your own Cloudflare</b></td>
+      <td><span class="quiet">A password-protected form on your own Workers account, for people who
+        will not open a terminal. <a href="https://github.com/nurkamol/seo-audit/blob/main/docs/hosting.md">What it costs</a>.</span></td>
+    </tr>
+  </table>
+  </div>
+</section>
+
+<section class="wrap" id="app">
+  <!-- #mac was this section's id when it was macOS-only; links to it still exist. -->
+  <a id="mac" aria-hidden="true"></a>
+  <h2>The desktop app</h2>
+  <p class="lede">
+    For anyone who would rather not open a terminal. Type a domain, press return, and read
+    the report as cause cards that expand into the pages they affect — filtering, search,
+    and export as PDF, HTML, Markdown, CSV or JSON. Every finished run is kept, so a
+    seven-minute crawl survives closing the window. A window over the same engine, never a
+    second one: the checks are the ones the command line runs, so the reports match.
+  </p>
+
+  <div class="grid">
+    <div class="card">
+      <h3>macOS</h3>
+      <p>Native SwiftUI and Liquid Glass, with the report drawn by the app itself.
+      Apple Silicon, macOS 26 or later.</p>
+      <p class="row"><a class="button" href="https://github.com/nurkamol/seo-audit/releases/latest">Download .zip</a></p>
+    </div>
+    <div class="card">
+      <h3>Windows</h3>
+      <p>A Tauri window over the same report the browser and the Mac app show.
+      Ships a Node inside it, so there is nothing to install first.</p>
+      <p class="row"><a class="button" href="https://github.com/nurkamol/seo-audit/releases/latest">Download setup.exe</a></p>
+    </div>
+    <div class="card">
+      <h3>Linux</h3>
+      <p>The same window, as a <code>.deb</code> for Debian and Ubuntu or an
+      <code>.AppImage</code> that runs anywhere.</p>
+      <p class="row"><a class="button" href="https://github.com/nurkamol/seo-audit/releases/latest">Download .deb or AppImage</a></p>
+    </div>
+  </div>
+
+  <h3>On macOS, Homebrew is the easier route</h3>
+  <pre class="command"><code>brew tap nurkamol/seo-audit https://github.com/nurkamol/seo-audit
+brew trust nurkamol/seo-audit
+brew install --cask seo-audit</code></pre>
+  <p class="quiet">
+    It checks the download against a checksum written by the build that produced it, clears
+    the quarantine flag, and the app opens the first time. Or build it yourself —
+    <code>./mac/build.sh</code>, which needs swiftc and the command line tools and nothing
+    else.
+  </p>
+
+  <h3 id="wont-open">If it will not open</h3>
+  <p>
+    Neither build is signed with a paid certificate — an Apple Developer account and a
+    Windows code-signing certificate are per-year costs this project does not carry — so
+    both systems will warn about a downloaded copy. Nothing is wrong with the file, but
+    <b>check it before you wave the warning away</b>: every release prints the macOS
+    checksum in its notes.
+  </p>
+  <div class="grid">
+    <div class="card">
+      <h4>macOS says "damaged and can't be opened"</h4>
+      <p>
+        It is not damaged — macOS refuses quarantined apps that carry no notarisation
+        ticket. Verify the download against the checksum in the release notes, then clear
+        the flag. No <code>sudo</code>: the app is yours, in a directory you can write to.
+      </p>
+    </div>
+    <div class="card">
+      <h4>Windows says "Windows protected your PC"</h4>
+      <p>
+        SmartScreen, on an unsigned installer. Check the file against
+        <code>SHA256SUMS.txt</code> below, then <b>More info → Run anyway</b>. The
+        <code>.AppImage</code> on Linux needs <code>chmod +x</code> before it will run.
+      </p>
+    </div>
+  </div>
+  <p>
+    First, check what you downloaded. Every release attaches a <code>SHA256SUMS.txt</code>
+    covering all four files — save it into the same folder and run this. It works for the
+    <code>.deb</code>, the <code>.AppImage</code> and the <code>setup.exe</code> too;
+    <code>--ignore-missing</code> is there because you downloaded one of the four, not all
+    of them.
+  </p>
+  <pre class="command"><code>shasum -a 256 --ignore-missing -c SHA256SUMS.txt</code></pre>
+  <p>Then, on macOS and <b>once it matches</b>, clear the flag:</p>
+  <pre class="command"><code>xattr -dr com.apple.quarantine "/Applications/SEO Audit.app"</code></pre>
+  <p class="quiet">
+    Clearing the flag is exactly what right-click → <b>Open</b> does in the Finder, without
+    the dialog. Do it because the checksum matched — the same command on a file you have not
+    checked is how people get hurt. Homebrew does the checking for you, which is why it is
+    the route above.
+  </p>
+</section>
+
+<footer class="wrap">
+  <p>
+    MIT licensed · <a href="https://github.com/nurkamol/seo-audit">source</a> ·
+    <a href="https://github.com/nurkamol/seo-audit/blob/main/CHANGELOG.md">changelog</a> ·
+    <a href="https://github.com/nurkamol/seo-audit/blob/main/ROADMAP.md">roadmap</a>
+  </p>
+</footer>
+
+<script>
+  // Copy the command a block contains. `innerText` rather than `textContent`,
+  // so the two-line brew block arrives with its newline instead of running
+  // together into something that is not a command.
+  for (const block of document.querySelectorAll('pre.command')) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'copy';
+    button.textContent = 'Copy';
+    button.setAttribute('aria-label', 'Copy command');
+
+    button.addEventListener('click', async () => {
+      const text = block.querySelector('code').innerText.trim();
+      try {
+        await navigator.clipboard.writeText(text);
+      } catch {
+        // Refused, or an insecure context. Selecting it is not the same as
+        // copying it, but it is the difference between one keystroke and
+        // retyping the command.
+        const range = document.createRange();
+        range.selectNodeContents(block.querySelector('code'));
+        const selection = getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        button.textContent = 'Press ⌘C';
+        setTimeout(() => { button.textContent = 'Copy'; }, 2400);
+        return;
+      }
+      button.textContent = 'Copied';
+      button.dataset.done = '';
+      setTimeout(() => {
+        button.textContent = 'Copy';
+        delete button.dataset.done;
+      }, 1600);
+    });
+
+    block.appendChild(button);
+  }
+</script>
+
+</body>
+</html>

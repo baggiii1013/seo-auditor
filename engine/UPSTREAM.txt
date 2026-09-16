@@ -1,0 +1,28 @@
+upstream: https://github.com/nurkamol/seo-audit
+commit:   155525d348f739474efc0b8498ec2e6c5d943304
+version:  1.40.1
+cloned:   2026-09-16
+
+Vendored so we can patch it. To diff against upstream:
+  git clone https://github.com/nurkamol/seo-audit /tmp/up && diff -ru /tmp/up engine
+
+LOCAL PATCHES
+-------------
+worker/index.mjs, /stream — two `.catch(() => {})` guards, both marked PATCHED
+  in the source.
+
+  `send()` is called un-awaited from the `onProgress` and `onNote` callbacks,
+  and `writer.close()` runs in a `finally` inside an async function nothing
+  awaits. When a browser closes the EventSource mid-crawl, every remaining
+  write rejects with ResponseAborted and the close rejects with "Invalid
+  state: WritableStream is closed" — as unhandled rejections, which under Node
+  can take the process down. Cloudflare hides this because `ctx.waitUntil`
+  owns the promise there; we pass `ctx` as null, so they surface.
+
+  Worth sending upstream — it is a bug in `--serve` too, not just here.
+
+KNOWN UPSTREAM PACKAGING BUG (not patched, does not affect us)
+--------------------------------------------------------------
+`files` in package.json omits `worker/`, so `npm i -g @nurkamol/seo-audit`
+installs a CLI whose `--serve` crashes with ERR_MODULE_NOT_FOUND. We import
+worker/index.mjs by path, so it never applies here.

@@ -1,0 +1,56 @@
+{
+  "name": "@nurkamol/seo-audit",
+  "version": "1.40.1",
+  "description": "Crawl a site's sitemap and check every page for SEO, metadata and structured-data problems that single-page graders miss. Zero dependencies.",
+  "type": "module",
+  "bin": {
+    "seo-audit": "bin/seo-audit.mjs"
+  },
+  "exports": {
+    ".": "./src/audit.mjs",
+    "./causes": "./src/causes.mjs",
+    "./exports": "./src/exports.mjs",
+    "./report": "./src/report.mjs",
+    "./score": "./src/score.mjs",
+    "./sitemap": "./src/sitemap.mjs",
+    "./areas": "./src/areas.mjs",
+    "./agents": "./src/agents.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "bin",
+    "src",
+    "action.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "pretest": "node scripts/link-engine.mjs",
+    "test": "node --test test/*.test.mjs",
+    "pretest:all": "node scripts/link-engine.mjs",
+    "test:all": "node scripts/test-all.mjs",
+    "audit": "node bin/seo-audit.mjs"
+  },
+  "keywords": [
+    "seo",
+    "audit",
+    "crawler",
+    "sitemap",
+    "metadata",
+    "open-graph",
+    "hreflang",
+    "cli"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nurkamol/seo-audit.git"
+  },
+  "homepage": "https://nurkamol.github.io/seo-audit/",
+  "bugs": {
+    "url": "https://github.com/nurkamol/seo-audit/issues"
+  }
+}

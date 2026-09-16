@@ -1,0 +1,164 @@
+// Pages whose content is the same page again.
+//
+// Titles and descriptions have been compared since early on; bodies never were,
+// and that is the axis that matters most — a hundred product pages that differ
+// by one word are a hundred pages competing with each other for one result,
+// and they burn the crawl budget that would have gone to the pages that differ.
+//
+// It costs no requests. The text was read, measured for `words`, and thrown
+// away; what is kept now is a sketch of it, a few hundred bytes a page.
+//
+// **MinHash**, rather than comparing text to text. Comparing every page with
+// every other page is quadratic, and at five thousand pages that is twelve
+// million comparisons of documents. A sketch of 64 numbers estimates how much
+// two pages overlap by how many of those numbers agree, and banding the sketch
+// puts likely pairs in the same bucket so most pairs are never compared at all.
+// The estimate is unbiased and its error at 64 samples is about 6% — which is
+// why the threshold below is nowhere near the edge.
+
+/** Words, lowercased, with everything that is not a letter or a number gone.
+ *  Punctuation and case differences are not content differences. */
+function normalise(text) {
+  return text
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+/** FNV-1a, 32-bit. Small, fast, well spread, and four lines. */
+function hash(text) {
+  let value = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    value ^= text.charCodeAt(i);
+    value = Math.imul(value, 0x01000193) >>> 0;
+  }
+  return value;
+}
+
+const SKETCH = 64;
+const SHINGLE = 5; // Five-word runs: long enough that a shared sentence is
+                   // meaningful, short enough that reordering does not hide a copy.
+
+/** The 64 permutations, fixed so two runs of this tool agree. Odd multipliers
+ *  so each is a bijection on 32 bits and no sketch position collapses. */
+const PERMUTATIONS = Array.from({ length: SKETCH }, (_, i) => ({
+  a: (2654435761 * (i + 1) * 2 + 1) >>> 0,
+  b: (40503 * (i + 7)) >>> 0,
+}));
+
+/** A sketch of a page's content, or `null` when there is not enough of it to
+ *  compare honestly.
+ *
+ *  `null` is returned rather than a weak sketch on purpose. A page with fifty
+ *  words shares most of them with any other page of fifty words, and a check
+ *  that reports those as duplicates would be reporting the length, not the
+ *  content. */
+export function fingerprint(text, { minimumWords = 100 } = {}) {
+  const words = normalise(text);
+  if (words.length < minimumWords) return null;
+
+  const sketch = new Array(SKETCH).fill(0xffffffff);
+  let shingles = 0;
+  for (let i = 0; i + SHINGLE <= words.length; i++) {
+    const value = hash(words.slice(i, i + SHINGLE).join(' '));
+    shingles++;
+    for (let k = 0; k < SKETCH; k++) {
+      const permuted = (Math.imul(value, PERMUTATIONS[k].a) + PERMUTATIONS[k].b) >>> 0;
+      if (permuted < sketch[k]) sketch[k] = permuted;
+    }
+  }
+  return shingles ? { sketch, words: words.length } : null;
+}
+
+/** How much two pages overlap, 0 to 1. The share of sketch positions that
+ *  agree estimates the Jaccard similarity of their five-word runs. */
+export function similarity(a, b) {
+  if (!a || !b) return 0;
+  let same = 0;
+  for (let i = 0; i < SKETCH; i++) if (a.sketch[i] === b.sketch[i]) same++;
+  return same / SKETCH;
+}
+
+const BAND = 4;
+
+/** Groups of pages whose content is near-identical.
+ *
+ *  `pages` is `[{ url, fingerprint, ...anything }]`. Anything without a
+ *  fingerprint is ignored rather than grouped with everything else.
+ *
+ *  Banding first: pages whose sketches agree across a whole band of four are
+ *  candidates, and only candidates are scored. Two pages at the threshold below
+ *  share a band with probability ~99%, so almost nothing real is missed, and
+ *  the pairs that are never compared are the ones that were never close. */
+export function cluster(pages, { threshold = 0.9 } = {}) {
+  const usable = pages.filter((p) => p.fingerprint);
+  if (usable.length < 2) return [];
+
+  const buckets = new Map();
+  for (const page of usable) {
+    for (let band = 0; band * BAND < SKETCH; band++) {
+      const key = band + ':' + page.fingerprint.sketch.slice(band * BAND, band * BAND + BAND).join(',');
+      buckets.set(key, [...(buckets.get(key) ?? []), page]);
+    }
+  }
+
+  // Union–find over the candidate pairs, so three pages that are each near the
+  // other two come out as one group of three rather than three pairs.
+  const parent = new Map(usable.map((p) => [p.url, p.url]));
+  const find = (url) => {
+    let root = url;
+    while (parent.get(root) !== root) root = parent.get(root);
+    // Point everything along the way straight at the root, so the next lookup
+    // is one step.
+    let walk = url;
+    while (parent.get(walk) !== root) {
+      const next = parent.get(walk);
+      parent.set(walk, root);
+      walk = next;
+    }
+    return root;
+  };
+  const union = (a, b) => {
+    const [ra, rb] = [find(a), find(b)];
+    if (ra !== rb) parent.set(ra, rb);
+  };
+
+  const scored = new Map();
+  for (const candidates of buckets.values()) {
+    if (candidates.length < 2 || candidates.length > 200) continue; // A bucket of
+    // everything is a bucket of nothing: it means the sketches are degenerate,
+    // not that the site is one page repeated.
+    for (let i = 0; i < candidates.length; i++) {
+      for (let j = i + 1; j < candidates.length; j++) {
+        const pair = [candidates[i].url, candidates[j].url].sort().join('\u0000');
+        if (scored.has(pair)) continue;
+        const score = similarity(candidates[i].fingerprint, candidates[j].fingerprint);
+        scored.set(pair, score);
+        if (score >= threshold) union(candidates[i].url, candidates[j].url);
+      }
+    }
+  }
+
+  const groups = new Map();
+  for (const page of usable) {
+    const root = find(page.url);
+    groups.set(root, [...(groups.get(root) ?? []), page]);
+  }
+
+  return [...groups.values()]
+    .filter((group) => group.length > 1)
+    .map((group) => {
+      const urls = group.map((p) => p.url).sort();
+      // The lowest score inside the group, so the number reported is the one
+      // that is true of every pair in it rather than of the closest pair.
+      let lowest = 1;
+      for (let i = 0; i < group.length; i++) {
+        for (let j = i + 1; j < group.length; j++) {
+          lowest = Math.min(lowest, similarity(group[i].fingerprint, group[j].fingerprint));
+        }
+      }
+      return { urls, pages: group, similarity: lowest };
+    })
+    .sort((a, b) => b.pages.length - a.pages.length || a.urls[0].localeCompare(b.urls[0]));
+}

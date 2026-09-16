@@ -1,0 +1,158 @@
+// Reports, kept.
+//
+// A 325-page site takes seven minutes to crawl. Losing that because a window
+// was closed is the difference between a tool somebody opens twice and a tool
+// somebody opens once. Every finished run is written to disk as the exact JSON
+// the engine produced — not this app's idea of it — so a report saved by one
+// version still opens in the next, and so `jq` works on it.
+
+import Foundation
+
+/// One stored report: enough to list it without reading the whole file.
+struct StoredReport: Identifiable, Hashable, Codable {
+    let id: UUID
+    let host: String
+    let site: String
+    let finishedAt: Date
+    let pages: Int
+    let findings: Int
+    let causes: Int
+    let errors: Int
+    let warnings: Int
+    /// How much of the checklist that run passed. Optional so an index written
+    /// before scoring existed still decodes — and so the Raycast extension,
+    /// which reads this same file, can show the number without opening the
+    /// report.
+    let score: Int?
+
+    var filename: String { "\(id.uuidString).json" }
+
+    var summary: String {
+        "\(pages) pages · \(causes) thing\(causes == 1 ? "" : "s") to change"
+    }
+}
+
+@MainActor
+final class Library: ObservableObject {
+    @Published private(set) var reports: [StoredReport] = []
+
+    private let folder: URL
+    private let indexFile: URL
+
+    /// Application Support, because these are documents the app manages rather
+    /// than preferences. Caches would be wrong: the system may delete those,
+    /// and seven minutes of crawling is not a cache.
+    init(root: URL? = nil) {
+        let base = Support.directory(root)
+        folder = base.appendingPathComponent("reports", isDirectory: true)
+        indexFile = base.appendingPathComponent("index.json")
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        load()
+    }
+
+    private func load() {
+        guard let data = try? Data(contentsOf: indexFile) else { return }
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        reports = ((try? decoder.decode([StoredReport].self, from: data)) ?? [])
+            // An index entry whose file is gone is a row that opens onto
+            // nothing, which is worse than not listing it.
+            .filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.filename).path) }
+            .sorted { $0.finishedAt > $1.finishedAt }
+    }
+
+    private func save() {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        encoder.outputFormatting = [.prettyPrinted]
+        try? encoder.encode(reports).write(to: indexFile)
+    }
+
+    /// Store a finished run. `raw` is what the engine sent, byte for byte.
+    @discardableResult
+    func keep(_ report: Report, site: String, raw: Data, at now: Date = Date()) -> StoredReport {
+        let counts = report.counts
+        let stored = StoredReport(
+            id: UUID(),
+            host: URL(string: site)?.host ?? site,
+            site: site,
+            finishedAt: now,
+            pages: report.meta.pages,
+            findings: report.findings.count,
+            causes: report.causes.count,
+            errors: counts.error,
+            warnings: counts.warn,
+            score: report.score?.score
+        )
+        try? raw.write(to: folder.appendingPathComponent(stored.filename))
+        reports.insert(stored, at: 0)
+        // A bound, because this is a list to click rather than an archive, and
+        // a 325-page report is about 700 KB.
+        if reports.count > 40 { reports.suffix(from: 40).forEach(deleteFile) ; reports = Array(reports.prefix(40)) }
+        save()
+        return stored
+    }
+
+    func reopen(_ stored: StoredReport) -> (Report, Data)? {
+        guard let data = try? Data(contentsOf: folder.appendingPathComponent(stored.filename)),
+              let report = try? JSONDecoder().decode(Report.self, from: data)
+        else { return nil }
+        return (report, data)
+    }
+
+    /// Where the kept reports are, for a Settings pane that offers to reveal it.
+    var location: URL { folder }
+
+    /// What they take up. Reports are small, but "small" is a claim somebody is
+    /// entitled to check.
+    var bytesOnDisk: Int {
+        reports.reduce(0) { total, stored in
+            let path = folder.appendingPathComponent(stored.filename).path
+            let size = (try? FileManager.default.attributesOfItem(atPath: path)[.size]) as? Int
+            return total + (size ?? 0)
+        }
+    }
+
+    /// Everything, gone. Separate from `forget` because a button that empties a
+    /// folder should not be the same code path as one that removes a row.
+    func forgetAll() {
+        for stored in reports { deleteFile(stored) }
+        reports = []
+        save()
+    }
+
+    /// Every other kept run a comparison can be against, newest first, with the
+    /// runs of this same host ahead of the rest. `besides` is the one on
+    /// screen, which is never worth offering as something to compare itself
+    /// with.
+    ///
+    /// Other hosts are offered because the question people actually arrive
+    /// with is "is the rebuild better than the site it replaces", and
+    /// new.example.com and example.com are two hosts. The engine compares
+    /// those two by path rather than by URL — see `diff()` in
+    /// `src/baseline.mjs` — so the answer is about the pages, not the domain.
+    func otherRuns(of host: String, besides current: StoredReport?) -> [StoredReport] {
+        reports
+            .filter { $0.id != current?.id }
+            .sorted {
+                if ($0.host == host) != ($1.host == host) { return $0.host == host }
+                return $0.finishedAt > $1.finishedAt
+            }
+    }
+
+    /// The newest kept run of a host, for when a comparison needs the other
+    /// side and the report on screen was never stored.
+    func mostRecent(of host: String) -> StoredReport? {
+        reports.filter { $0.host == host }.max { $0.finishedAt < $1.finishedAt }
+    }
+
+    func forget(_ stored: StoredReport) {
+        deleteFile(stored)
+        reports.removeAll { $0.id == stored.id }
+        save()
+    }
+
+    private func deleteFile(_ stored: StoredReport) {
+        try? FileManager.default.removeItem(at: folder.appendingPathComponent(stored.filename))
+    }
+}

@@ -1,0 +1,819 @@
+// Orchestration: find the pages, fetch them, run the checks.
+import { Fetcher, mapLimit } from './http.mjs';
+import { bodyKind, parseHtml, parseSitemap } from './parse.mjs';
+import { parseRobots, robotsVerdict } from './robots.mjs';
+import { redirectChecks } from './redirects.mjs';
+import { pageChecks, crossPageChecks, sitemapChecks } from './checks.mjs';
+import { certificateExpiry, siteChecks, hostChecks } from './site.mjs';
+import { linkGraph } from './graph.mjs';
+import { compareAgents } from './compare.mjs';
+import { scoreRun } from './score.mjs';
+import { buildLlms } from './llms.mjs';
+import { buildSchema } from './schema.mjs';
+import { searchConsole } from './console.mjs';
+import { applyIgnores, expectationChecks, matchGlob } from './config.mjs';
+import { psiChecks, psiTargets, estimateSeconds } from './psi.mjs';
+import { sectionOf } from './causes.mjs';
+import { rebuild, changedSince } from './sitemap.mjs';
+import { plural } from './text.mjs';
+
+/** Sitemap URLs, following a sitemap index one level down.
+ *
+ *  robots.txt is asked first, because that is where a site *declares* its
+ *  sitemap and guessing filenames only works for the conventions you thought
+ *  of — Yoast writes `/sitemap_index.xml`, Astro writes `/sitemap-index.xml`,
+ *  and both are wrong to assume. */
+async function discover(origin, fetcher, explicit) {
+  const tried = [];
+  // A 429 is the server saying "ask later", which is not the same as "there is
+  // no sitemap here". Reporting absence from a refusal to answer is a false
+  // positive, and the caller needs to know the difference.
+  let rateLimited = false;
+  let candidates = [explicit];
+
+  if (!explicit) {
+    const robots = await fetcher.get(new URL('/robots.txt', origin).toString());
+    const declared = robots.ok
+      ? [...robots.body.matchAll(/^\s*sitemap:\s*(\S+)\s*$/gim)].map((m) => m[1])
+      : [];
+    candidates = [
+      ...declared,
+      new URL('/sitemap-index.xml', origin).toString(),
+      new URL('/sitemap_index.xml', origin).toString(),
+      new URL('/sitemap.xml', origin).toString(),
+    ];
+  }
+
+  for (const candidate of candidates) {
+    // A sitemap may itself redirect (http→https, or /sitemap.xml → the index).
+    const res = (await fetcher.chain(candidate)).final;
+    tried.push(`${candidate} → ${res.error ?? res.status}`);
+    if (res.status === 429) rateLimited = true;
+    if (!res.ok || !/<(urlset|sitemapindex)/i.test(res.body)) continue;
+
+    const { urls, sitemaps, entries } = parseSitemap(res.body);
+    // Per-file, because the 50,000-URL and 50MB limits are per sitemap file
+    // rather than per site — a flattened total would report the wrong thing.
+    // `locs` as well as the count, because a URL listed in two files of one
+    // index cannot be seen from a flattened total.
+    const stat = (url, body, locs) => ({ url, urls: locs.length, bytes: Buffer.byteLength(body), locs });
+
+    if (urls.length) {
+      return {
+        urls,
+        entries,
+        files: [stat(candidate, res.body, urls)],
+        source: candidate,
+        tried,
+        rateLimited,
+      };
+    }
+
+    const nested = await mapLimit(sitemaps, 4, async (child) => {
+      const sub = (await fetcher.chain(child)).final;
+      if (!sub.ok) return { urls: [], entries: [], files: [] };
+      const parsed = parseSitemap(sub.body);
+      return { ...parsed, files: [stat(child, sub.body, parsed.urls)] };
+    });
+    const all = nested.flatMap((n) => n.urls);
+    if (all.length) {
+      return {
+        urls: all,
+        entries: nested.flatMap((n) => n.entries),
+        files: nested.flatMap((n) => n.files),
+        source: candidate,
+        tried,
+        rateLimited,
+      };
+    }
+  }
+  return { urls: [], entries: [], files: [], source: null, tried, rateLimited };
+}
+
+// Files that are linked from pages but are not pages. Fetching a 40MB video to
+// discover it has no <title> wastes the crawl budget on a site that, by
+// definition, has no sitemap telling us where the pages actually are.
+const NOT_A_PAGE =
+  /\.(jpe?g|png|gif|webp|avif|svg|ico|pdf|zip|gz|mp4|webm|mp3|wav|woff2?|ttf|eot|css|js|json|xml|txt|csv|docx?|xlsx?)($|\?)/i;
+
+/**
+ * Breadth-first from the homepage, following internal links.
+ *
+ * Only used when no sitemap exists. Ordinarily that stopped the tool dead,
+ * which meant the sites least likely to have been looked after were the ones it
+ * refused to look at.
+ *
+ * robots.txt is obeyed. A crawler that ignores it is rude, and here it would
+ * also spend the budget on exactly the pages nobody wants indexed.
+ */
+async function crawlByLinks(origin, fetcher, { limit, concurrency, robotsGroups, onProgress }) {
+  const start = new URL('/', origin).toString();
+  const queued = new Set([start]);
+  const visited = new Set();
+  let frontier = [start];
+  const pages = [];
+
+  while (frontier.length && pages.length < limit) {
+    const batch = frontier.slice(0, limit - pages.length);
+    frontier = [];
+
+    // Redirects are followed here, unlike everywhere else in this tool. A link
+    // crawl has to land on the page a visitor would land on: www.mozilla.org/
+    // answers 302 to /en-US/, and reading only the first hop finds a redirect
+    // with no links in it and concludes the site has one page.
+    const fetched = await mapLimit(batch, concurrency, async (pageUrl) => {
+      const { final } = await fetcher.chain(pageUrl);
+      const isHtml = /text\/html/i.test(final.headers.get('content-type') ?? '');
+      onProgress?.({ phase: 'crawl', status: final.status, ms: final.ms, url: final.url });
+      return {
+        url: final.url,
+        res: final,
+        html: final.body,
+        // Same as the sitemap path: the header is a claim, the body is the fact.
+        doc: final.ok && isHtml && !bodyKind(final.body) ? parseHtml(final.body, final.url) : null,
+      };
+    });
+
+    for (const page of fetched) {
+      // Two aliases redirecting to one page are one page.
+      const key = page.url.replace(/\/$/, '');
+      if (visited.has(key)) continue;
+      // A redirect that leaves the site is somebody else's page.
+      if (!page.url.startsWith(origin)) continue;
+      visited.add(key);
+      pages.push(page);
+
+      for (const href of page.doc?.links.internal ?? []) {
+        const clean = href.split('#')[0];
+        if (queued.has(clean) || visited.has(clean.replace(/\/$/, '')) || NOT_A_PAGE.test(clean)) continue;
+        try {
+          if (!robotsVerdict(robotsGroups, new URL(clean).pathname).allowed) continue;
+        } catch {
+          continue;
+        }
+        queued.add(clean);
+        frontier.push(clean);
+      }
+    }
+  }
+
+  // Everything reachable that the budget did not reach.
+  return { pages, remaining: frontier.length };
+}
+
+/**
+ * @param {string} target site origin, or a sitemap URL
+ * @param {{limit?: number, concurrency?: number, sitemap?: string}} opts
+ */
+export async function audit(target, opts = {}) {
+  const started = Date.now();
+  const fetcher = new Fetcher({ concurrency: opts.concurrency ?? 6, userAgent: opts.userAgent });
+
+  const url = new URL(target);
+  const findings = [];
+
+  // Which host actually serves the site. Everything once-per-domain —
+  // robots.txt, llms.txt, the security headers — is only meaningful on the
+  // host that answers, and a crawler reads them there: RFC 9309 asks for at
+  // least five redirects to be followed for robots.txt, and Google follows
+  // them.
+  //
+  // Audited from the bare domain of a site that lives at www, this used to
+  // read all three off a 301. A store with a good robots.txt — agent
+  // instructions, a UCP endpoint, the lot — was reported as having none, its
+  // llms.txt was looked for on a host that does not serve it, and its
+  // Referrer-Policy verdict came from a redirect's headers. Three findings,
+  // none of them true, on any site that lives at www.
+  let origin = url.origin;
+  const landing = await fetcher.chain(`${url.origin}/`);
+  if (landing.final.ok) {
+    const settled = new URL(landing.final.url).origin;
+    if (settled !== origin) {
+      findings.push({
+        level: 'info',
+        id: 'origin-redirected',
+        title: 'Audited the host this one redirects to',
+        detail:
+          `${origin}/ answers ${landing.hops[0]?.status ?? 301} and the chain ends at ${settled}/, so ` +
+          'that is where the pages, robots.txt, llms.txt and the response headers were read. Reading ' +
+          'them off the redirect instead is how a site with a perfectly good robots.txt gets reported ' +
+          'as having none.',
+        url: origin,
+      });
+      opts.onNote?.(`${origin} redirects to ${settled} — auditing there`);
+      origin = settled;
+    }
+  }
+
+  // Give a rolling deploy time to reach every edge before judging it.
+  if (opts.settle) {
+    const settled = await fetcher.settle(origin + '/', opts.settle);
+    if (!settled && opts.onNote) {
+      opts.onNote(`still serving inconsistent HTML after ${opts.settle}s — crawling anyway`);
+    }
+  }
+  const { urls, entries, files, source, tried, rateLimited: sitemapRateLimited } = await discover(
+    origin,
+    fetcher,
+    opts.sitemap ?? (/\.xml$/i.test(url.pathname) ? target : null),
+  );
+
+  const limit = opts.limit ?? 200;
+  const concurrency = opts.concurrency ?? 6;
+  const onProgress = opts.onProgress;
+
+  if (source) onProgress?.({ phase: 'sitemap', url: source, detail: `${urls.length} URLs` });
+
+  // A host that never answered is not a sitemap problem, and following links
+  // from a page that does not load would find nothing either.
+  if (!urls.length && !fetcher.reachable) {
+    // Read the certificate before blaming bot protection.
+    //
+    // A browser refuses an expired certificate and so does `fetch`, so "nothing
+    // answered" and "the certificate lapsed years ago" are indistinguishable
+    // from here — except that one of them is knowable, over a socket that does
+    // not validate. This used to assert "the TLS connection succeeds" and point
+    // at Cloudflare Bot Fight Mode, which for expired.badssl.com was wrong
+    // twice over and sends somebody to the wrong dashboard. The site checks
+    // that would have caught it never run, because the crawl gives up first.
+    const expiresAt =
+      url.protocol === 'https:'
+        ? await (opts.readCertificateExpiry ?? certificateExpiry)(url.hostname)
+        : null;
+    const lapsed = expiresAt ? Math.floor(((opts.now ?? Date.now()) - expiresAt) / 86_400_000) : 0;
+
+    findings.push(
+      lapsed > 0
+        ? {
+            level: 'error',
+            id: 'tls-expired',
+            title: `The TLS certificate expired ${plural(lapsed, 'day')} ago`,
+            detail:
+              `It ran out on ${new Date(expiresAt).toISOString().slice(0, 10)}, which is why nothing here ` +
+              'could be fetched — browsers refuse the site outright. Renew it; nothing else about this ' +
+              'site can be measured until then.',
+            url: origin,
+          }
+        : {
+            level: 'error',
+            id: 'unreachable',
+            title: 'The site did not answer a single request',
+            detail:
+              `Tried: ${tried.join(', ')}. ` +
+              // Only said where it was actually established. The hosted Worker
+              // has no socket to read a certificate over, so it gets null here
+              // and must not be made to assert that the certificate is fine —
+              // a runtime that cannot run a check says so rather than implying
+              // a result.
+              (expiresAt ? 'The certificate is valid, so this is ' : 'This is ') +
+              'usually a bot-protection rule stalling non-browser clients — Cloudflare Bot Fight Mode ' +
+              "does exactly this. If it is your site, allow this crawler's user agent, or pass " +
+              '--user-agent to present a different one.',
+            url: origin,
+          },
+    );
+    return {
+      findings,
+      meta: {
+        origin,
+        pages: 0,
+        ignored: 0,
+        requests: fetcher.count,
+        ms: Date.now() - started,
+        date: new Date().toISOString().slice(0, 10),
+      },
+    };
+  }
+
+  let pages;
+  let truncated = 0;
+
+  // --- only what the sitemap says changed ---------------------------------
+  // A five-thousand-page site audited weekly does not need five thousand
+  // requests. Refused rather than approximated when the sitemap's lastmod
+  // cannot answer it — see changedSince().
+  let considered = urls;
+  if (opts.since && urls.length) {
+    const changed = changedSince(entries, opts.since);
+    if (changed.refused) {
+      findings.push({
+        level: 'warn',
+        id: 'since-not-usable',
+        title: 'Could not limit the crawl to what changed',
+        detail: `${changed.refused} Every URL was checked instead, so this report is complete.`,
+        url: origin,
+      });
+    } else {
+      considered = changed.urls;
+      findings.push({
+        level: 'info',
+        id: 'since',
+        title: `${plural(changed.skipped.length, 'URL')} were unchanged since ${opts.since}`,
+        detail:
+          `The sitemap says ${plural(changed.changed.length, 'page')} changed on or after ${opts.since}` +
+          (changed.unknown.length
+            ? `, and ${changed.unknown.length} carry no lastmod and were checked anyway — not knowing ` +
+              'when a page changed is not evidence that it did not'
+            : '') +
+          `. Nothing below says anything about the ${changed.skipped.length} that were skipped.`,
+        url: origin,
+      });
+    }
+  }
+
+  // --- URLs the run was told to leave alone -------------------------------
+  // Faceted search, tag archives and paginated listings dominate the crawl
+  // budget and the report on a real store, and there was no way to keep them
+  // out. Applied before the limit, so excluding is what makes room rather than
+  // just moving which pages get cut.
+  const patterns = opts.exclude ?? [];
+  const excluded = [];
+  const wanted = patterns.length
+    ? considered.filter((url) => {
+        const path = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+        const hit = patterns.some((pattern) => matchGlob(pattern, path));
+        if (hit) excluded.push(url);
+        return !hit;
+      })
+    : considered;
+
+  if (excluded.length) {
+    // Always reported. A crawl that quietly shrank is a report that reads as a
+    // clean bill of health for pages nobody looked at.
+    findings.push({
+      level: 'info',
+      id: 'excluded',
+      title: `${plural(excluded.length, 'URL')} were excluded by --exclude`,
+      detail:
+        `${patterns.join(', ')} matched ${excluded.length} of the ${considered.length} URLs considered, ` +
+        `so ${wanted.length} were left to check. This is a fact about the run, not about the site — ` +
+        `nothing below says anything about the excluded pages. First few: ${excluded.slice(0, 3).join(', ')}`,
+      url: origin,
+    });
+  }
+
+  const bySitemap = wanted.length > 0;
+
+  if (bySitemap) {
+    const list = wanted.slice(0, limit);
+    truncated = wanted.length - list.length;
+    pages = await mapLimit(list, concurrency, async (pageUrl) => {
+      const res = await fetcher.get(pageUrl);
+      const isHtml = /text\/html/i.test(res.headers.get('content-type') ?? '');
+      onProgress?.({ phase: 'crawl', status: res.status, ms: res.ms, url: pageUrl });
+      return {
+        url: pageUrl,
+        res,
+        html: res.body,
+        // `isHtml` is the server's claim; `bodyKind` is what actually came
+        // back. A sitemap that lists an XML file the server labels text/html
+        // otherwise gets parsed as a page and reported for having no h1.
+        doc: res.ok && isHtml && !bodyKind(res.body) ? parseHtml(res.body, pageUrl) : null,
+      };
+    });
+  } else {
+    // No sitemap, but the site answers. Follow links instead of giving up: the
+    // sites least likely to have been looked after were the ones this refused
+    // to look at.
+    opts.onNote?.('no sitemap — following links from the homepage instead');
+    const robotsRes = await fetcher.get(new URL('/robots.txt', origin).toString());
+    const robotsGroups = robotsRes.ok ? parseRobots(robotsRes.body) : [];
+
+    const crawled = await crawlByLinks(origin, fetcher, {
+      limit,
+      concurrency,
+      robotsGroups,
+      onProgress,
+    });
+    pages = crawled.pages;
+    truncated = crawled.remaining;
+
+    // A refusal to answer is not an absence. If the server rate-limited the
+    // probe, this run learned nothing about whether a sitemap exists, and
+    // saying "No sitemap found" would be a finding about the crawl reported as
+    // a finding about the site.
+    findings.push(
+      sitemapRateLimited
+        ? {
+            level: 'warn',
+            id: 'sitemap-not-checked',
+            title: 'Whether there is a sitemap is not known',
+            detail:
+              `Tried: ${tried.join(', ')}. The server answered HTTP 429 — "ask later" — so this run ` +
+              'never saw whether a sitemap is there, and followed links from the homepage instead, ' +
+              `reaching ${plural(pages.length, 'page')}. This is a fact about the crawl, not about the site. ` +
+              'Run it again with a lower --concurrency, or pass --sitemap <url>.',
+            url: origin,
+          }
+        : {
+            level: 'warn',
+            id: 'no-sitemap',
+            title: 'No sitemap found',
+            detail:
+              `Tried: ${tried.join(', ')}. This run followed links from the homepage instead, which is what a ` +
+              `crawler has to do without one — ${pages.length} pages were reached that way. A sitemap states ` +
+              'the pages you want indexed rather than leaving it to be inferred, and carries lastmod. ' +
+              'Pass --sitemap <url> if one exists somewhere unusual.',
+            url: origin,
+          },
+    );
+
+    if (!pages.some((p) => p.res.ok)) {
+      findings.push(
+        sitemapRateLimited || fetcher.rateLimited > 0
+          ? {
+              level: 'error',
+              id: 'crawl-rate-limited',
+              title: 'Nothing was read — the server rate limited this run',
+              detail:
+                'Every request came back HTTP 429, so no page was read and nothing below is a ' +
+                'statement about the site. Wait, then run it again with a lower --concurrency. ' +
+                'Two runs back to back against the same host will do this on their own.',
+              url: origin,
+            }
+          : {
+              level: 'error',
+              id: 'nothing-crawlable',
+              title: 'Nothing could be crawled',
+              detail:
+                'No sitemap, and the homepage did not return a page to follow links from. There is nothing ' +
+                'here to audit.',
+              url: origin,
+            },
+      );
+    }
+  }
+
+  onProgress?.({ phase: 'crawl', detail: `${pages.length} pages in ${((Date.now() - started) / 1000).toFixed(1)}s` });
+
+  for (const page of pages) findings.push(...pageChecks(page, opts.limits));
+  // Click depth is measured from the homepage, and a sitemap need not list it.
+  // Fetched here only when the crawl did not already have it, and the fetcher
+  // caches, so the site checks below pay nothing for it.
+  let home = null;
+  if (!pages.some((p) => p.doc && p.res.ok && new URL(p.url).pathname.replace(/\/$/, '') === '')) {
+    const { final } = await fetcher.chain(origin);
+    if (final.ok && /text\/html/i.test(final.headers.get('content-type') ?? '') && !bodyKind(final.body)) {
+      home = { url: final.url, doc: parseHtml(final.body, final.url) };
+    }
+  }
+  // One graph for the whole run: the orphan check and click depth read it, and
+  // so does the ordering of the report. How many links point at a page, and how
+  // far it is from the homepage, is the difference between a list of problems
+  // and a list of work worth doing.
+  const graph = linkGraph(pages.filter((p) => p.doc && p.res.ok), home);
+  findings.push(...crossPageChecks(pages, { limits: opts.limits, truncated, home, graph }));
+  // The same pages, asked for by somebody else. Only when asked for: it doubles
+  // the request cost of every page it looks at.
+  if (opts.compareAs) {
+    findings.push(
+      ...(await compareAgents(pages, {
+        agent: opts.compareAs.ua,
+        label: opts.compareAs.label,
+        sample: opts.compareSample ?? 10,
+        onProgress,
+      })),
+    );
+  }
+  findings.push(...sitemapChecks(entries, source, Date.now(), files));
+  findings.push(...expectationChecks(pages, opts.expect));
+  onProgress?.({ phase: 'checks', detail: `${findings.length} findings from the pages themselves` });
+  findings.push(
+    ...(await siteChecks(origin, fetcher, pages, { ...opts, sitemapUrls: urls, bySitemap })),
+  );
+
+  // What else is on this domain — a leaked staging copy, a subdomain whose
+  // CNAME points at a service that is gone, a second host serving the same
+  // site. Only when asked: it is a slow third-party lookup plus one per
+  // candidate host, and a crawl should not quietly spend that.
+  let hosts = null;
+  if (opts.hosts) {
+    onProgress?.({ phase: 'hosts', detail: 'asking certificate transparency what else is on this domain' });
+    const swept = await hostChecks(origin, fetcher, { ...opts, onProgress });
+    findings.push(...swept.findings);
+    hosts = swept.hosts;
+  }
+
+  // A migration's redirect map, checked against the live site. Only when one
+  // is handed over: there is nothing to infer here, and guessing at old URLs
+  // would invent findings.
+  if (opts.redirectRules?.length) {
+    findings.push(
+      ...(await redirectChecks(opts.redirectRules, fetcher, origin, {
+        limit: opts.maxRedirectChecks ?? 200,
+        onProgress,
+      })),
+    );
+  }
+
+  // Performance, measured by Google rather than guessed at here. Slow and
+  // rate-limited, so only on request, and for a named page or a sample of a
+  // named section rather than the whole crawl.
+  if (opts.psi?.length) {
+    const { urls: targets, notes } = psiTargets(opts.psi, pages.map((p) => p.url), {
+      origin,
+      sample: opts.psiSample,
+    });
+    findings.push(...notes);
+    if (targets.length) {
+      opts.onNote?.(
+        `measuring ${plural(targets.length, 'page')} with PageSpeed Insights — about ` +
+          `${Math.ceil(estimateSeconds(targets.length) / 60)} min …`,
+      );
+      findings.push(...(await psiChecks(targets, { strategy: opts.psiStrategy, onProgress })));
+    }
+  }
+
+  // Said once, at the end, because a run that took eight minutes should say
+  // why. It is not a finding about the site: it is this tool describing what it
+  // had to do to get through, and it is the only place the numbers above can be
+  // read as "slower than usual" rather than "something is wrong".
+  if (fetcher.rateLimited > 0) {
+    findings.push({
+      level: 'info',
+      id: 'rate-limit-slowed',
+      title: 'The crawl was slowed down to get through',
+      detail:
+        `The server answered HTTP 429 — asking for a slower crawl — ${plural(fetcher.rateLimited, 'time')}, so ` +
+        `requests were paused and the concurrency came down to ${fetcher.concurrency}. This is not a ` +
+        'finding about the site — it explains the elapsed time, and any page reported as rate-limited ' +
+        'was not read at all. Pass a lower --concurrency to get through cleanly.',
+      url: origin,
+    });
+  }
+
+  // What these pages actually do in Google. Opt-in, and the only thing here
+  // that needs an account.
+  if (opts.searchConsole) {
+    findings.push(...(await searchConsole(origin, findings, {
+      siteUrl: typeof opts.searchConsole === 'string' ? opts.searchConsole : undefined,
+    })));
+  }
+
+  if (truncated > 0) {
+    findings.push({
+      level: 'info',
+      id: 'truncated',
+      title: bySitemap
+        ? `${truncated} pages were not checked`
+        : `At least ${truncated} more pages are linked but were not checked`,
+      detail: bySitemap
+        ? `The sitemap lists ${urls.length} URLs and the limit is ${pages.length}. Run it again with ` +
+          `--limit ${urls.length} to check them all.`
+        : `The crawl stopped at ${pages.length} pages with more still queued. Following links cannot know ` +
+          'the total in advance the way a sitemap can, so this is a floor, not a count. Raise it with --limit.',
+      url: source ?? origin,
+    });
+  }
+
+  // Where a finding sits matters nearly as much as what it is. A thin page
+  // Google will index is a problem; the same page carrying noindex, or handing
+  // its ranking to a canonical elsewhere, is one nobody needs to act on. Tagged
+  // in a single pass at the end rather than threaded through every check, since
+  // it is a property of the page rather than of any one thing found on it.
+  const notIndexable = new Set();
+  for (const page of pages) {
+    // A page the server refused to hand over is not a page that refuses to be
+    // indexed. Its indexability is unknown, and "not indexable" is an answer.
+    if (page.res.status === 429) continue;
+    if (!page.res.ok) {
+      notIndexable.add(page.url);
+      continue;
+    }
+    if (!page.doc) continue;
+    const header = page.res.headers?.get?.('x-robots-tag') ?? '';
+    const noindexed = /noindex/i.test(page.doc.robots ?? '') || /noindex/i.test(header);
+    const canonical = page.doc.canonical?.[0];
+    const defersElsewhere =
+      canonical && canonical.replace(/\/$/, '') !== page.url.replace(/\/$/, '');
+    if (noindexed || defersElsewhere) notIndexable.add(page.url);
+  }
+  for (const finding of findings) {
+    if (finding.url && notIndexable.has(finding.url)) finding.indexable = false;
+    // Absent stays absent: "nothing links here" and "this was never measured"
+    // are different answers, and only one of them is about the site.
+    const reach = finding.url ? graph.reachOf(finding.url) : null;
+    if (reach) finding.reach = reach;
+  }
+
+  // The sitemap says "index this"; the page says otherwise. Same shape as
+  // robots.txt disallowing a sitemap URL, and just as invisible: each file is
+  // defensible alone and they only contradict each other when read together.
+  //
+  // Pages that failed to load are excluded — page-status and sitemap-redirect
+  // already report those, and this would say it a second time in worse words.
+  if (bySitemap) {
+    const listed = new Set(urls.map((u) => u.replace(/\/$/, '')));
+    const contradictions = pages.filter(
+      (p) => p.res.ok && p.doc && notIndexable.has(p.url) && listed.has(p.url.replace(/\/$/, '')),
+    );
+    if (contradictions.length) {
+      const why = (p) =>
+        /noindex/i.test(p.doc.robots ?? '') || /noindex/i.test(p.res.headers?.get?.('x-robots-tag') ?? '')
+          ? 'noindex'
+          : `canonical → ${p.doc.canonical[0]}`;
+      findings.push({
+        level: 'warn',
+        id: 'sitemap-not-indexable',
+        title: `${plural(contradictions.length, 'sitemap URL')} will not be indexed`,
+        detail:
+          `${contradictions.slice(0, 3).map((p) => `${p.url} (${why(p)})`).join(', ')}` +
+          `${contradictions.length > 3 ? `, and ${contradictions.length - 3} more` : ''}. A sitemap is a ` +
+          'list of the pages you want indexed; these ask not to be. Either drop them from the sitemap or ' +
+          'drop the directive.',
+        url: source,
+      });
+    }
+  }
+
+  // What the site has decided to live with is dropped last, so an ignore rule
+  // can silence a site-wide check as easily as a per-page one.
+  const [kept, ignored] = applyIgnores(findings, opts.ignore);
+
+  // The sitemap this site should have had. Only when asked for, and built from
+  // `kept` rather than every finding, so a page silenced by an ignore rule is
+  // silenced here too.
+  let sitemap = null;
+  if (opts.writeSitemap) {
+    // robots.txt is already in the fetcher's cache — siteChecks read it — so
+    // this costs nothing, and a sitemap that lists a disallowed URL is a
+    // conflict the site does not need.
+    const robotsRes = await fetcher.get(new URL('/robots.txt', origin).toString());
+    const groups = robotsRes.ok ? parseRobots(robotsRes.body) : [];
+    sitemap = rebuild(pages, kept, {
+      entries,
+      truncated,
+      rateLimited: kept.filter((f) => f.id === 'rate-limited').length,
+      allowed: (url) => robotsVerdict(groups, new URL(url).pathname).allowed,
+    });
+  }
+
+  // What this run was in a position to check at all. A site with no images has
+  // not passed the alt-text check and a run without --psi has not passed the
+  // performance ones, and a score that counted either as a pass would hand out
+  // free points for doing less. Worked out here because this is the only place
+  // that has both the crawl and the options — a front end reading the JSON
+  // gets it in `meta` rather than guessing.
+  const some = (fn) => pages.some((p) => p.doc && fn(p.doc));
+  const applicable = {
+    images: some((d) => d.images.length > 0),
+    hreflang: some((d) => d.hreflang.length > 0),
+    jsonld: some((d) => d.jsonld.length > 0),
+    ogImage: some((d) => Boolean(d.og['og:image'])),
+    twitterImage: some((d) => Boolean(d.twitter['twitter:image'])),
+    fingerprints: some((d) => d.fingerprint !== null),
+    multipage: pages.length > 1,
+    https: origin.startsWith('https:'),
+    // Certificates need a TLS socket. Node has one; the Workers runtime does
+    // not, and says so by handing in a reader that returns nothing.
+    tls: origin.startsWith('https:') && opts.readCertificateExpiry === undefined,
+    sitemap: Boolean(source),
+    // Only a site that serves llms.txt can contradict it. `llms-missing` is
+    // emitted exactly when it is absent, so the run already knows.
+    llmsTxt: !kept.some((finding) => finding.id === 'llms-missing'),
+    expect: Boolean(opts.expect?.length),
+    psi: Boolean(opts.psi?.length),
+    // Field data is Google's, not ours: it exists for a page or it does not,
+    // and PageSpeed says which by returning nothing. One page short of it is
+    // enough to leave the whole family out — under-counting is the honest way
+    // round, since the alternative scores a page on data it never had.
+    psiField: Boolean(opts.psi?.length) && !kept.some((f) => f.id === 'psi-no-field-data'),
+    redirects: Boolean(opts.redirects),
+    external: Boolean(opts.checkExternal),
+    compareAs: Boolean(opts.compareAs),
+    // Asked for and answered are different things. A run with --hosts whose
+    // certificate transparency lookup failed has not checked these, and
+    // `hosts-not-checked` says so in the report; scoring them as passed would
+    // hand out credit for a lookup that never happened.
+    hosts: Boolean(opts.hosts) && hosts !== null,
+  };
+
+  // The llms.txt this site should have had, from the same crawl and by the
+  // same rule as the sitemap: nothing invented, and a refusal rather than a
+  // file built from a fraction of the site.
+  const llms = opts.writeLlms
+    ? buildLlms(pages, { origin, truncated, rateLimited: kept.filter((f) => f.id === 'rate-limited').length })
+    : null;
+
+  // The structured data this site could add, from what it already says and
+  // nothing else. Same refusals, and a fourth rule of its own: every value is
+  // a string this crawl read off this site.
+  const schema = opts.writeSchema
+    ? buildSchema(pages, { origin, truncated, rateLimited: kept.filter((f) => f.id === 'rate-limited').length })
+    : null;
+
+  return {
+    findings: kept,
+    ...(sitemap ? { sitemap } : {}),
+    ...(llms ? { llms } : {}),
+    ...(schema ? { schema } : {}),
+    // How much of the checklist this site passes. Computed here so that the
+    // terminal, the Markdown, the HTML, the window and the extension all show
+    // one number rather than five arithmetics that drift apart.
+    score: scoreRun(kept, { pages: pages.length, applicable }),
+    meta: {
+      applicable,
+      ignored,
+      origin,
+      pages: pages.length,
+      notIndexable: notIndexable.size,
+      requests: fetcher.count,
+      ms: Date.now() - started,
+      date: new Date().toISOString().slice(0, 10),
+      sitemap: source,
+      // The inventory behind the host findings. Absent unless --hosts asked
+      // for it, so a report that does not mention other hosts is one that was
+      // never asked to look rather than one that looked and found none.
+      ...(hosts ? { hosts } : {}),
+    },
+  };
+}
+
+/** What a run would do, without doing it.
+ *
+ *  A full crawl of a large site is minutes of somebody's time and hundreds of
+ *  requests to somebody else's server, and until now there was no way to find
+ *  out whether it was pointed at the right place until it had finished. This
+ *  costs a handful of requests: the landing page to settle the host, robots.txt,
+ *  and whichever sitemap answers.
+ *
+ *  It reports what the crawl would actually do rather than what would be ideal.
+ *  Robots rules are only consulted when there is no sitemap and links are being
+ *  followed, so this does not claim otherwise — a preview that describes a
+ *  different crawl from the one that runs is worse than no preview. */
+export async function preview(target, opts = {}) {
+  const started = Date.now();
+  const fetcher = new Fetcher({ concurrency: opts.concurrency ?? 6, userAgent: opts.userAgent });
+  const asked = new URL(target);
+
+  let origin = asked.origin;
+  let redirected = null;
+  const landing = await fetcher.chain(`${asked.origin}/`);
+  if (landing.final.ok) {
+    const settled = new URL(landing.final.url).origin;
+    if (settled !== origin) {
+      redirected = { from: origin, to: settled };
+      origin = settled;
+    }
+  }
+
+  const { urls, entries, source, tried, rateLimited } = await discover(
+    origin,
+    fetcher,
+    opts.sitemap ?? (asked.pathname.match(/\.xml$/i) ? target : null),
+  );
+
+  const limit = opts.limit ?? 200;
+
+  // The same two filters the crawl applies, or this would describe a different
+  // run from the one it is previewing — which is worse than not previewing.
+  let considered = urls;
+  let sinceRefused = null;
+  let skippedBySince = 0;
+  if (opts.since && urls.length) {
+    const changed = changedSince(entries, opts.since);
+    if (changed.refused) sinceRefused = changed.refused;
+    else {
+      considered = changed.urls;
+      skippedBySince = changed.skipped.length;
+    }
+  }
+  const patterns = opts.exclude ?? [];
+  const beforeExcluding = considered.length;
+  if (patterns.length) {
+    considered = considered.filter((url) => {
+      const path = (() => { try { return new URL(url).pathname; } catch { return url; } })();
+      return !patterns.some((pattern) => matchGlob(pattern, path));
+    });
+  }
+
+  const sections = new Map();
+  for (const url of considered) {
+    const section = sectionOf(url);
+    sections.set(section, (sections.get(section) ?? 0) + 1);
+  }
+
+  return {
+    origin,
+    redirected,
+    reachable: fetcher.reachable,
+    rateLimited: Boolean(rateLimited),
+    sitemap: source,
+    tried,
+    listed: urls.length,
+    skippedBySince: skippedBySince,
+    sinceRefused,
+    excluded: beforeExcluding - considered.length,
+    // Without a sitemap the crawl follows links and cannot know in advance how
+    // many pages it will find. Saying "up to the limit" is the honest answer.
+    wouldCheck: considered.length ? Math.min(considered.length, limit) : null,
+    skippedByLimit: considered.length > limit ? considered.length - limit : 0,
+    limit,
+    // The biggest parts of the site, which is what decides whether the limit is
+    // in the right place.
+    sections: [...sections].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([path, count]) => ({ path, count })),
+    sample: considered.slice(0, 10),
+    requests: fetcher.count,
+    ms: Date.now() - started,
+  };
+}

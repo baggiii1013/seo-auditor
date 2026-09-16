@@ -1,0 +1,45 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SEO Audit",
+  "version": "1.40.1",
+  "identifier": "com.nurkamol.seo-audit.desktop",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null,
+      "capabilities": [
+        "default"
+      ]
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "nsis",
+      "appimage",
+      "deb"
+    ],
+    "externalBin": [
+      "binaries/node"
+    ],
+    "resources": {
+      "engine": "engine"
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "DeveloperTool",
+    "shortDescription": "Crawl a site's sitemap and check every page",
+    "longDescription": "Audits every page a sitemap lists, not just the homepage, and groups what it finds by the thing that has to change. Nothing leaves the machine.",
+    "publisher": "Nurkamol Vakhidov",
+    "homepage": "https://github.com/nurkamol/seo-audit",
+    "license": "MIT",
+    "copyright": "MIT licensed"
+  }
+}

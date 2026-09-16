@@ -1,36 +1,43 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# seo-auditor
 
-## Getting Started
-
-First, run the development server:
+A Next.js front end for [nurkamol/seo-audit](https://github.com/nurkamol/seo-audit).
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run dev            # http://localhost:3000
+npm start & npm run check   # the one runnable check (SITE=… BASE=… to point it elsewhere)
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## How it fits together
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The engine is vendored at `engine/` (see `engine/UPSTREAM.txt` for the commit and
+our two local patches). It is not re-implemented anywhere:
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **`app/api/engine/[...path]/route.ts`** — `engine/worker/index.mjs` exports
+  `handle(Request, env) => Response`, which is exactly a Next route handler.
+  This file strips the `/api/engine` prefix, presents the worker's bearer token
+  and hands the request over. That one file is the whole backend, and every
+  route the engine has comes with it: `/stream` (SSE), `/run`, `/plan`,
+  `/preview`, `/diff`, `/reports`, `/compare`, `/checks`, `/options`,
+  `/agents`, `/render`.
+- **`app/page.tsx`** — draws the form from `formFields()`, the engine's own
+  table of every flag. The controls are not hard-coded, so a flag added
+  upstream becomes a control here. `notInApp()` renders the list of what this
+  window deliberately does not reach, with the reason for each.
+- **`app/auditor.tsx`** — the form, the preview, and the `EventSource` onto
+  `/stream?format=json`.
+- **`app/report.tsx`** — draws the report from the payload, and asks
+  `/render` for every saved file. It formats nothing itself, so a report saved
+  here and one saved by the CLI are the same document.
 
-## Learn More
+Because it runs under Node rather than on Cloudflare, the TLS checks are real
+and finished runs are kept — `seo-audit --reports` lists them.
 
-To learn more about Next.js, take a look at the following resources:
+## If you deploy this
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+`route.ts` opens every gate (`ALLOW_PSI`, `ALLOW_SEARCH_CONSOLE`,
+`ALLOW_HOSTS`) because the person running it locally is the person whose quota,
+account and rate limit get spent. Serving strangers means deleting those three
+lines first.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Multi-site portfolio runs (`seo-audit a.com b.com`) are CLI-only here — the
+`/stream` route takes one URL.

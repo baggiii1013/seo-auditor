@@ -1,0 +1,220 @@
+# Build the macOS app on a tag and attach it to the release, then point the
+# Homebrew cask at what was actually built.
+#
+# The cask's version and checksum are written here rather than by hand, so the
+# formula can never describe a build that does not exist — which is the usual
+# way a cask breaks.
+name: macOS app
+
+on:
+  push:
+    # Version tags only. `v1` floats forward with every compatible release and
+    # matches `v*`, so it started a second build that would have tried to
+    # attach a Mac app to a release named v1, which does not exist.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The tag to build and attach to
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # macos-26 or newer: Liquid Glass needs the macOS 26 SDK, and macos-15
+    # carries Xcode 16, where the app does not compile at all.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Check the runner can build Liquid Glass
+        run: |
+          sdk="$(xcrun --sdk macosx --show-sdk-version)"
+          echo "macOS SDK $sdk, $(swiftc --version | head -1)"
+          case "$sdk" in
+            2[6-9].*|[3-9][0-9].*) ;;
+            *) echo "::error::Liquid Glass needs the macOS 26 SDK; this runner has $sdk"; exit 1 ;;
+          esac
+
+      # The sibling workflow says a break landing on main and waiting until
+      # release day is the worst possible time to find it — and then this job,
+      # the one that actually ships, did not run the suite. 1.34.0 built and
+      # published while `swift test` was failing on main. The tests are half a
+      # second; a bad build is a Homebrew cask pointing at it.
+      - name: Test the app
+        run: swift test
+
+      - name: Build the app with Node inside it
+        run: |
+          # The runner's own Node is what gets bundled, so the app works on a
+          # Mac with nothing installed.
+          NODE_BIN="$(command -v node)" ./mac/build.sh
+
+      - name: Check it is what it claims to be
+        run: |
+          app="build/SEO Audit.app"
+          test -x "$app/Contents/MacOS/SEO Audit"
+          test -x "$app/Contents/Resources/node"
+          test -f "$app/Contents/Resources/engine/bin/seo-audit.mjs"
+          plutil -lint "$app/Contents/Info.plist"
+          codesign --verify --deep --strict "$app"
+          # The bundled engine has to run, or the app opens onto an error page.
+          "$app/Contents/Resources/node" "$app/Contents/Resources/engine/bin/seo-audit.mjs" --version
+
+      - name: Zip it
+        id: package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          [ -n "${{ github.event.inputs.tag }}" ] && version="${{ github.event.inputs.tag }}" && version="${version#v}"
+          name="seo-audit-$version-macos.zip"
+          # ditto rather than zip: it keeps the bundle's symlinks and the
+          # signature intact, which plain zip does not.
+          ditto -c -k --sequesterRsrc --keepParent "build/SEO Audit.app" "$name"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "sha=$(shasum -a 256 "$name" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          ls -lh "$name"
+
+      # The release used to be created by hand after the tag was pushed, which
+      # meant this job raced it and lost: every release began with a red
+      # `release not found`, a `gh release create`, and a re-run. A failure that
+      # is part of the normal procedure is a failure nobody reads, and the next
+      # one — a real one — reads the same.
+      - name: Make sure the release exists
+        run: |
+          tag="v${{ steps.package.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "$tag already exists"
+            exit 0
+          fi
+
+          # Both halves are already written by the time a tag is pushed: the
+          # notes are that version's CHANGELOG section, and the title is the
+          # tag's own annotation. Neither becomes a second place to keep the
+          # same sentence up to date.
+          #
+          # `index()` rather than a regex: the heading is `## [1.31.0] — date`,
+          # and a version interpolated into a pattern makes `[1.31.0]` a
+          # character class that matches the digits `0`, `1` and `3`. It would
+          # not error — it would quietly publish the wrong section, or none.
+          awk -v v="${{ steps.package.outputs.version }}" '
+            index($0, "## [" v "]") == 1 { found = 1; next }
+            found && index($0, "## [") == 1 { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+
+          title="$(git tag -l --format='%(contents:subject)' "$tag")"
+          [ -n "$title" ] || title="${{ steps.package.outputs.version }}"
+
+          # The person most likely to be confused by this release is standing on
+          # this page, having just downloaded a zip that macOS will call
+          # "damaged". Telling them here costs nothing and is where they are.
+          cat > footer.md <<FOOTER
+
+          ---
+
+          ### Installing on macOS
+
+          \`\`\`bash
+          brew tap nurkamol/seo-audit https://github.com/nurkamol/seo-audit
+          brew trust nurkamol/seo-audit
+          brew install --cask seo-audit
+          \`\`\`
+
+          Homebrew verifies the download against the checksum below and clears the
+          quarantine flag for you, so the app opens the first time.
+
+          **Downloading the zip instead?** macOS may say *"SEO Audit is damaged and
+          can't be opened."* It is not damaged. The app is ad-hoc signed rather than
+          notarised — notarising needs a paid Apple Developer account this project
+          does not have — and macOS refuses quarantined apps without a notarisation
+          ticket. Check what you downloaded first:
+
+          \`\`\`bash
+          shasum -a 256 seo-audit-${{ steps.package.outputs.version }}-macos.zip
+          # ${{ steps.package.outputs.sha }}
+          \`\`\`
+
+          Then, once it matches, clear the flag — no \`sudo\` needed:
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine "/Applications/SEO Audit.app"
+          \`\`\`
+
+          That is what right-click → **Open** does in the Finder, without the dialog.
+          Apple Silicon, macOS Tahoe or newer.
+
+          ### Windows and Linux
+
+          The \`setup.exe\`, \`.deb\` and \`.AppImage\` below are attached by a separate
+          job and may appear a few minutes after this release does.
+
+          The Windows installer is unsigned, so SmartScreen shows *"Windows protected
+          your PC"* — **More info → Run anyway**. Same reason as macOS: a code-signing
+          certificate is a paid, per-year thing this project does not have. The
+          \`.AppImage\` needs \`chmod +x\` before it will run.
+
+          Check any of them first. A \`SHA256SUMS.txt\` covering every file here is
+          attached alongside them, and the same checksums are listed at the end of
+          these notes:
+
+          \`\`\`bash
+          shasum -a 256 --ignore-missing -c SHA256SUMS.txt
+          \`\`\`
+          FOOTER
+
+          if [ -s notes.md ]; then
+            cat footer.md >> notes.md
+            gh release create "$tag" --title "$title" --notes-file notes.md
+          else
+            # A tag with no CHANGELOG section is worth saying out loud, but not
+            # worth losing the build over — the app is already sitting here
+            # built and signed.
+            echo "::warning::no CHANGELOG section for ${{ steps.package.outputs.version }} — using generated notes"
+            gh release create "$tag" --title "$title" --generate-notes
+            # Generated notes replace rather than append, so the footer goes on
+            # afterwards — the install instructions matter more than the reason
+            # the notes were generated.
+            gh release view "$tag" --json body -q .body > body.md
+            cat footer.md >> body.md
+            gh release edit "$tag" --notes-file body.md
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Attach it to the release
+        run: gh release upload "v${{ steps.package.outputs.version }}" "${{ steps.package.outputs.name }}" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Point the cask at it
+        run: |
+          # A tag build is a detached, shallow checkout: there is no local main
+          # to commit onto, which is what the first run of this discovered.
+          # Fetch it, switch, and edit there — no stash, nothing to unwind.
+          git fetch --depth=1 origin main
+          git checkout -B main origin/main
+
+          cask=Casks/seo-audit.rb
+          sed -i '' -e "s|^  version .*|  version \"${{ steps.package.outputs.version }}\"|" "$cask"
+          sed -i '' -e "s|^  sha256 .*|  sha256 \"${{ steps.package.outputs.sha }}\"|" "$cask"
+          grep -E "^  (version|sha256)" "$cask"
+          ruby -c "$cask"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$cask"
+          # [skip ci]: the cask is not code, and a full test run for a checksum
+          # is a minute of somebody's runner for nothing.
+          git diff --cached --quiet || {
+            git commit -m "Cask: ${{ steps.package.outputs.version }} [skip ci]"
+            git push origin main
+          }

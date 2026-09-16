@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // The vendored engine is plain JS with its own Swift, Rust and Raycast
+    // front ends. Not ours to lint, and raycast/ is TypeScript that would
+    // otherwise be type-checked into our build.
+    "engine/**",
   ]),
 ]);
 

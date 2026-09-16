@@ -1,0 +1,459 @@
+# The Tauri shell, built for the platforms the macOS app does not ship to.
+#
+# Each runner builds with its own Node, because `desktop/scripts/prepare.mjs`
+# bundles `process.execPath`. That is deliberate: cross-compiling a runtime is a
+# way to ship a binary nobody ran, and `setup-node` already pins the version.
+#
+# On a branch it proves the bundles build and leaves them as artifacts. On a tag
+# it attaches them to the release, beside the macOS zip.
+name: Desktop shell
+
+on:
+  push:
+    branches: [main]
+    # A tag builds the same bundles and attaches them to the release. The
+    # macOS job creates that release from the tag's annotation and the
+    # CHANGELOG, and this one waits for it rather than racing to make an empty
+    # one that would lose both the title and the notes.
+    #
+    # Version tags only — the same shape mac-release.yml and npm-publish.yml
+    # use, and for the reason written down there: `v1` floats forward with
+    # every compatible release and matches `v*`, so a bare `v*` starts a second
+    # build that spends fifteen minutes to fail attaching bundles to a release
+    # named v1, which does not exist. Written here once already and reproduced
+    # anyway.
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+    # The shell wraps the engine, so a change to either can break a bundle.
+    paths:
+      - 'desktop/**'
+      - 'bin/**'
+      - 'src/**'
+      - 'worker/**'
+      - '.github/workflows/desktop.yml'
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'bin/**'
+      - 'src/**'
+      - 'worker/**'
+      - '.github/workflows/desktop.yml'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: A release tag to attach the bundles to. Leave empty to just build.
+        required: false
+        default: ''
+      only_checksums:
+        description: Skip the build and just refresh SHA256SUMS for that tag. The bundles must already be attached.
+        type: boolean
+        required: false
+        default: false
+
+# Read by default; the build job asks for write because it uploads release
+# assets. Its absence is what made the first tagged run fail — the bundles
+# built, installed and ran, and then `gh release upload` came back with
+# "HTTP 403: Resource not accessible by integration".
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Skipped when a run is only refreshing checksums for a release whose
+    # bundles are already attached. `needs:` cannot be conditional, but a
+    # skipped job completes instantly, so skipping this is how the checksums
+    # job stops waiting a quarter of an hour to hash four files it downloads
+    # anyway.
+    if: ${{ !inputs.only_checksums }}
+    strategy:
+      # One platform failing should not hide whether the others work — the
+      # whole point of this job is finding out which ones do.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            bundles: appimage,deb
+          - os: windows-latest
+            bundles: nsis
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Cargo's registry and the build directory, which is most of the minutes.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      # Tauri draws with the system webview, which on Linux is one that has to
+      # be installed. 22.04 for webkit2gtk-4.1, which is what Tauri v2 wants.
+      - name: What Tauri needs on Linux
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install the Tauri CLI
+        working-directory: desktop
+        run: npm ci
+
+      # Before any cargo command, not just the build. Tauri's build script
+      # validates `externalBin` at compile time, so `cargo test` on an unstaged
+      # tree fails with "resource path binaries/node-… doesn't exist" — which is
+      # how this job failed the first time it ran.
+      #
+      # It stages a Node and the engine, then starts the staged copy and waits
+      # for it to announce a port. The first bundle shipped without `worker/`
+      # and produced an app that opened, started nothing and waited; a list of
+      # directories is exactly the kind of thing that looks right and is not.
+      - name: Stage the engine, and prove it runs
+        working-directory: desktop
+        run: node scripts/prepare.mjs
+
+      - name: The shell's own tests
+        working-directory: desktop/src-tauri
+        run: cargo test
+
+      - name: Bundle
+        working-directory: desktop
+        run: npx tauri build --bundles ${{ matrix.bundles }}
+
+      - name: What came out
+        shell: bash
+        run: |
+          find desktop/src-tauri/target/release/bundle -maxdepth 2 -type f \
+            \( -name '*.AppImage' -o -name '*.deb' -o -name '*-setup.exe' \) \
+            -exec ls -lh {} \; || true
+
+      # --- Does the thing we just built actually run? ----------------------
+      # Building a bundle proves it bundles. The macOS build proved something
+      # else entirely — it opened, started nothing and waited, because a
+      # directory the engine imports had not been copied. These two platforms
+      # cannot be run on the machine this was written on, so they are run here.
+
+      - name: What went into the Linux packages
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          echo "── deb ──"
+          dpkg --contents desktop/src-tauri/target/release/bundle/deb/*.deb \
+            | grep -E 'usr/(bin|lib)' | head -20
+
+      - name: Install it, run it, and watch for the engine
+        if: matrix.os == 'ubuntu-22.04'
+        run: |
+          sudo apt-get install -y xvfb
+          sudo dpkg -i desktop/src-tauri/target/release/bundle/deb/*.deb \
+            || sudo apt-get -f install -y
+
+          app="$(command -v seo-audit || true)"
+          test -n "$app" || { echo "::error::the package installed no runnable binary"; exit 1; }
+          echo "installed at $app"
+
+          # The shell narrates its startup here, because a windowed app that
+          # fails has nowhere else to say why.
+          export SEO_AUDIT_SHELL_LOG="$RUNNER_TEMP/shell.log"
+
+          xvfb-run -a "$app" &
+
+          # The engine is a child process announcing a port. Waiting for it is
+          # the only proof that the whole chain works: bundle, sidecar,
+          # resources, spawn.
+          started=""
+          for _ in $(seq 1 40); do
+            if pgrep -f 'seo-audit.mjs --serve' >/dev/null; then started=1; break; fi
+            sleep 1
+          done
+          if [ -z "$started" ]; then
+            echo "::error::the app started and its engine never did"
+            echo "── what the shell said ──"; cat "$SEO_AUDIT_SHELL_LOG" 2>/dev/null || echo "(nothing)"
+            pkill -f "$app" || true
+            exit 1
+          fi
+          echo "the engine came up"
+          cat "$SEO_AUDIT_SHELL_LOG" 2>/dev/null || true
+
+          # And it goes away again. A server that outlives the window holding
+          # its port is a bug this project has already shipped once.
+          #
+          # The app itself, not the xvfb wrapper around it — killing the wrapper
+          # left the app running, and then reported the engine as having
+          # outlived a window that was still open.
+          pkill -f "$app" || true
+          for _ in $(seq 1 15); do
+            pgrep -f 'seo-audit.mjs --serve' >/dev/null || { echo "and it stopped with the window"; exit 0; }
+            sleep 1
+          done
+          echo "::error::the engine outlived the window that started it"
+          pkill -f 'seo-audit.mjs --serve' || true
+          exit 1
+
+      - name: Install it, run it, and watch for the engine
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $setup = Get-ChildItem desktop/src-tauri/target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          # /S is NSIS's silent switch. Tauri's installer defaults to per-user.
+          Start-Process -FilePath $setup.FullName -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 5
+
+          $app = Get-ChildItem -Path "$env:LOCALAPPDATA","$env:ProgramFiles","${env:ProgramFiles(x86)}" `
+            -Filter 'seo-audit.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $app) { Write-Error 'the installer put no runnable binary anywhere I looked'; exit 1 }
+          Write-Host "installed at $($app.FullName)"
+          Write-Host '── what came with it ──'
+          Get-ChildItem $app.DirectoryName | Select-Object Name, @{n='MB';e={[math]::Round($_.Length/1MB,1)}} | Format-Table
+
+          $env:SEO_AUDIT_SHELL_LOG = Join-Path $env:RUNNER_TEMP 'shell.log'
+          $shell = Start-Process -FilePath $app.FullName -PassThru
+          $started = $false
+          foreach ($_ in 1..40) {
+            if (Get-Process node -ErrorAction SilentlyContinue) { $started = $true; break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $started) {
+            Write-Host '── is the app even still running? ──'
+            Get-Process -Id $shell.Id -ErrorAction SilentlyContinue | Format-Table Id, ProcessName
+            Write-Host '── what the shell said ──'
+            if (Test-Path $env:SEO_AUDIT_SHELL_LOG) { Get-Content $env:SEO_AUDIT_SHELL_LOG } else { Write-Host '(nothing)' }
+            Stop-Process -Id $shell.Id -Force -ErrorAction SilentlyContinue
+            Write-Error 'the app started and its engine never did'
+            exit 1
+          }
+          Write-Host 'the engine came up'
+          if (Test-Path $env:SEO_AUDIT_SHELL_LOG) { Get-Content $env:SEO_AUDIT_SHELL_LOG }
+
+          # Terminated outright, which is the case nothing cooperative can
+          # catch: no Destroyed, no Exit, no chance to stop anything. A job
+          # object with KILL_ON_JOB_CLOSE is what makes this survivable, so this
+          # is the harshest version of the test on purpose.
+          Stop-Process -Id $shell.Id -Force -ErrorAction SilentlyContinue
+          foreach ($_ in 1..15) {
+            if (-not (Get-Process node -ErrorAction SilentlyContinue)) {
+              Write-Host 'and it stopped with the window'; exit 0
+            }
+            Start-Sleep -Seconds 1
+          }
+          Get-Process node -ErrorAction SilentlyContinue | Stop-Process -Force
+          Write-Error 'the engine outlived the window that started it'
+          exit 1
+
+      # --- On a tag, this is a release ----------------------------------------
+
+      # A tag push attaches to its own tag. A manual run attaches to whatever
+      # tag it was given, which is how a release whose upload failed gets its
+      # bundles without force-moving a tag people may already have fetched.
+      - name: What release are we attaching to, if any
+        id: release
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          elif [ "$GITHUB_REF_TYPE" = tag ]; then
+            tag="$GITHUB_REF_NAME"
+          else
+            tag=""
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -n "$tag" ]; then echo "attaching to $tag"; else echo "not a release build"; fi
+
+      - name: Make sure the release exists
+        if: steps.release.outputs.tag != ''
+        shell: bash
+        run: |
+          tag="${{ steps.release.outputs.tag }}"
+          # The macOS job writes the notes from the CHANGELOG and the title from
+          # the tag's annotation. Racing it to create an empty one would replace
+          # both with nothing, so this only ever waits.
+          for _ in $(seq 1 30); do
+            gh release view "$tag" >/dev/null 2>&1 && exit 0
+            sleep 10
+          done
+          echo "::error::$tag has no release after five minutes, and this job does not make one —             the macOS job writes its notes and its title, and an empty release here would take both away"
+          exit 1
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Attach the bundles
+        if: steps.release.outputs.tag != ''
+        shell: bash
+        run: |
+          shopt -s nullglob
+          files=(
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+          )
+          test ${#files[@]} -gt 0 || { echo "::error::nothing was built to attach"; exit 1; }
+          # --clobber so re-running a release job replaces the asset rather than
+          # failing on a name that is already there.
+          gh release upload "${{ steps.release.outputs.tag }}" "${files[@]}" --clobber
+          printf '  attached %s\n' "${files[@]##*/}"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seo-audit-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/nsis/*-setup.exe
+
+  # --- checksums --------------------------------------------------------------
+  # Every release tells people to check a download before trusting it, which is
+  # only honest advice if there is something to check it against. The macOS zip
+  # had a checksum because the cask needs one; the three desktop bundles had
+  # none, so "verify it first" was advice you could not follow on Windows or
+  # Linux — the two platforms whose warning dialogs are the reason to say it.
+  #
+  # One job rather than a step in each build, because two matrix jobs editing
+  # the same release notes race, and the loser's edit is silently gone. It hashes
+  # what is actually attached rather than what each runner built, so it also
+  # proves the upload arrived intact.
+  checksums:
+    needs: build
+    # `always()` so a skipped build does not skip this too — that is the whole
+    # mechanism above. Still refuses to run behind a build that actually failed,
+    # because hashing half-attached assets publishes a checksum for a release
+    # nobody should be trusting yet.
+    if: |
+      always()
+      && (github.ref_type == 'tag' || inputs.tag != '')
+      && needs.build.result != 'failure'
+      && needs.build.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Hash every file on the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # No checkout in this job — it needs the release's assets, not the
+          # repository. Without this, gh looks for a git remote to work out
+          # which repo it is talking about and fails with "fatal: not a git
+          # repository", which names the wrong problem.
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          mkdir -p dl && cd dl
+          gh release download "$tag" --clobber
+          # A SHA256SUMS.txt from an earlier run would otherwise be hashed into
+          # its own replacement.
+          rm -f SHA256SUMS.txt
+          shasum -a 256 -- * | sort -k2 > SHA256SUMS.txt
+          echo "── what is on $tag ──"
+          cat SHA256SUMS.txt
+          gh release upload "$tag" SHA256SUMS.txt --clobber
+
+      - name: Put them in the notes as well
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release view "$tag" --json body -q .body > body.md
+          # Drop a Checksums section from an earlier run. It is always appended
+          # last, so everything from that heading on is the previous version.
+          awk '/^### Checksums$/ { exit } { print }' body.md > stripped.md
+          # Command substitution eats trailing newlines, so a re-run does not
+          # leave behind the blank line the previous append put there — which
+          # would otherwise grow by one every time this ran.
+          printf '%s\n' "$(cat stripped.md)" > notes.md
+          {
+            echo
+            echo '### Checksums'
+            echo
+            echo 'Verify a download before you wave a warning away. With `SHA256SUMS.txt`'
+            echo 'saved beside the file, in the same folder:'
+            echo
+            echo '```bash'
+            echo 'shasum -a 256 --ignore-missing -c SHA256SUMS.txt'
+            echo '```'
+            echo
+            echo '```'
+            cat dl/SHA256SUMS.txt
+            echo '```'
+            echo
+            echo 'The macOS line appears twice in these notes on purpose: once above, computed'
+            echo 'when the app was built, and once here, computed from what is actually attached.'
+            echo 'They should agree.'
+          } >> notes.md
+          gh release edit "$tag" --notes-file notes.md
+          echo "notes updated for $tag"
+
+  # --- winget -----------------------------------------------------------------
+  # Windows' equivalent of the Homebrew cask, and the reason the shell's update
+  # path has a `winget upgrade` branch at all. Until a manifest exists in
+  # microsoft/winget-pkgs, no Windows copy is a winget install and that branch
+  # is unreachable.
+  #
+  # Submitting needs a token that can fork and open a pull request there, which
+  # is a credential this repository does not have and cannot mint for itself. So
+  # the job says it was skipped rather than silently not running: a release that
+  # quietly did not publish looks exactly like one that did.
+  winget:
+    needs: build
+    if: github.ref_type == 'tag' || inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit the manifest
+        id: check
+        env:
+          TOKEN: ${{ secrets.WINGET_TOKEN }}
+          # Reading a public repository, but authenticated: the anonymous quota
+          # is sixty an hour per address and a runner shares its address.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::WINGET_TOKEN is not set, so no winget manifest was submitted for \
+              $tag. Windows users will be sent to the release page instead of being offered an \
+              in-app update. Create a classic PAT with public_repo scope and add it as \
+              WINGET_TOKEN."
+            exit 0
+          fi
+          # winget-releaser only ever *updates* a package. The first version has
+          # to reach microsoft/winget-pkgs another way, and until it has, this
+          # action exits 1 — turning an otherwise-finished release red for a
+          # step that cannot succeed yet. A red tick people learn to ignore is
+          # worse than no tick.
+          #
+          # Asked precisely rather than swallowed with continue-on-error: once
+          # the package is there, a real failure still fails.
+          found=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "authorization: Bearer $GH_TOKEN" \
+            "https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/n/Nurkamol/SeoAudit")
+          if [ "$found" = "404" ]; then
+            echo "::warning::Nurkamol.SeoAudit is not in microsoft/winget-pkgs yet, so there is \
+              nothing for this to update. The first version has to be submitted once by hand — \
+              see 'Bootstrapping winget' in desktop/README.md. Every release after that is \
+              automatic."
+            exit 0
+          fi
+          echo "submitting $tag to winget"
+          echo "run=yes" >> "$GITHUB_ENV"
+
+      - uses: vedantmgoyal9/winget-releaser@main
+        if: env.run == 'yes'
+        with:
+          identifier: Nurkamol.SeoAudit
+          release-tag: ${{ steps.check.outputs.tag }}
+          # The bundle's own name, so a release with the macOS zip attached
+          # beside it does not confuse the two.
+          installers-regex: '-setup\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}

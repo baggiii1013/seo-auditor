@@ -1,0 +1,1072 @@
+// Whole-site checks: the files and headers that exist once per domain, plus
+// the link graph, which is the thing single-page graders can never see.
+import { connect } from 'node:tls';
+import { mapLimit } from './http.mjs';
+import { parseRobots, robotsVerdict } from './robots.mjs';
+import { aiAccess, describeAccess } from './agents-ai.mjs';
+import { parseHtml } from './parse.mjs';
+import { schemaNodes, seriesOf, paginatedCanonical } from './checks.mjs';
+import { similarity } from './dupes.mjs';
+import {
+  resolve as resolveDns, certificateNames, collapseFleets, rankHosts, looksLikeStaging, NXDOMAIN,
+} from './dns.mjs';
+import { plural } from './text.mjs';
+
+// Two weeks is enough to renew by hand if the automation has quietly stopped,
+// which is the failure this is for — nobody is short of warning about a
+// certificate they knew was expiring.
+const CERT_WARN_DAYS = 14;
+const DAY = 24 * 60 * 60 * 1000;
+
+/** When the certificate expires, or null if that cannot be established.
+ *
+ *  Deliberately its own connection rather than anything read off a fetch: Node
+ *  does not expose the peer certificate through `fetch`, and this is the whole
+ *  of the dependency-free way to ask. */
+export function certificateExpiry(hostname, { timeout = 8000 } = {}) {
+  return new Promise((resolve) => {
+    let socket;
+    const done = (value) => {
+      socket?.destroy();
+      resolve(value);
+    };
+    try {
+      // Validation is switched off deliberately, and only here. An *expired*
+      // certificate fails the handshake, so a validating connection cannot read
+      // the one fact this function exists to report — the check would go silent
+      // in exactly the case it is for. Nothing is sent over this socket and
+      // nothing is read from it but the certificate's dates, which are the same
+      // ones a browser would show.
+      // SNI is not permitted to carry an IP address (RFC 6066), and Node warns
+      // about it. An IP has no name to send.
+      const isIp = /^[\d.]+$/.test(hostname) || hostname.includes(':');
+      socket = connect(
+        {
+          host: hostname,
+          port: 443,
+          ...(isIp ? {} : { servername: hostname }),
+          timeout,
+          rejectUnauthorized: false,
+        },
+        () => {
+          const cert = socket.getPeerCertificate();
+          done(cert?.valid_to ? Date.parse(cert.valid_to) : null);
+        },
+      );
+    } catch {
+      return resolve(null);
+    }
+    // A host that is not listening, or not speaking TLS, has nothing to say.
+    socket.on('error', () => done(null));
+    socket.on('timeout', () => done(null));
+  });
+}
+
+const f = (level, id, title, detail, url) => ({ level, id, title, detail, url });
+
+export async function siteChecks(origin, fetcher, pages, opts = {}) {
+  // Every URL the sitemap listed, not only the ones this run crawled — with
+  // --limit in play they are not the same set, and treating them as the same
+  // reports every uncrawled page as missing from the sitemap.
+  const inSitemap = new Set((opts.sitemapUrls ?? []).map((u) => u.replace(/\/$/, '')));
+  const out = [];
+  const base = new URL(origin);
+
+  // A file is absent when the server says it is absent. Anything else — a rate
+  // limit, a 403 from bot protection, a 5xx — means the answer was not given,
+  // and "there is no robots.txt" is an answer. The page checks learned this in
+  // 1.15.0 and these did not: a store that answers 429 under load had its
+  // llms.txt reported missing while serving it at 200 the moment it was asked
+  // again by hand.
+  const absent = (res) => res.status === 404 || res.status === 410 || res.status === 0;
+
+  // --- robots.txt ---------------------------------------------------------
+  const robots = await fetcher.get(new URL('/robots.txt', base).toString());
+  let blocksAll = false;
+  // Kept for the AI-crawler section below, which asks the same parsed file a
+  // different question rather than fetching and parsing it a second time.
+  let aiGroups = null;
+  const robotsUrl = robots.url;
+  if (!robots.ok && absent(robots)) {
+    out.push(f('warn', 'robots-missing', 'No robots.txt',
+      `HTTP ${robots.status || robots.error}. Not fatal, but it is where the sitemap is advertised.`,
+      robots.url));
+  } else if (robots.ok) {
+    const groups = parseRobots(robots.body);
+    aiGroups = groups;
+
+    // Asked of the parser rather than by pattern-matching the file. The old
+    // test was "some line says Disallow: / and some line says User-agent: *",
+    // which are routinely different groups: gov.uk blocks deepcrawl and
+    // python.org blocks HTTrack, and both were reported as blocking the entire
+    // site from everyone.
+    if (!robotsVerdict(groups, '/').allowed) {
+      blocksAll = true;
+      out.push(f('error', 'robots-blocks-all', 'robots.txt blocks the whole site',
+        'Disallow: / applies to Googlebot. Nothing will be indexed.', robots.url));
+    }
+    if (!/sitemap:/i.test(robots.body)) {
+      out.push(f('info', 'robots-no-sitemap', 'robots.txt does not list a sitemap',
+        'One line, and every crawler finds the sitemap without guessing.', robots.url));
+    }
+
+    // The site contradicting itself: the sitemap says index this, robots.txt
+    // says do not crawl it. Skipped when the whole site is blocked, because
+    // that is already reported above and this would restate it once per URL.
+    if (!blocksAll) {
+      const blocked = [];
+      for (const listed of opts.sitemapUrls ?? []) {
+        let path;
+        try {
+          path = new URL(listed).pathname;
+        } catch {
+          continue;
+        }
+        const verdict = robotsVerdict(groups, path);
+        if (!verdict.allowed) blocked.push({ listed, rule: verdict.rule });
+      }
+      if (blocked.length) {
+        const shown = blocked.slice(0, 3).map((b) => `${b.listed} (Disallow: ${b.rule.path})`).join(', ');
+        out.push(f('error', 'robots-blocks-sitemap-url',
+          `${plural(blocked.length, 'sitemap URL')} are disallowed by robots.txt`,
+          `${shown}${blocked.length > 3 ? `, and ${blocked.length - 3} more` : ''}. The sitemap asks Google ` +
+            'to index these and robots.txt forbids fetching them, so they land in the index without a ' +
+            'description, or not at all. One of the two files is wrong.', robots.url));
+      }
+    }
+  }
+
+  // --- llms.txt -----------------------------------------------------------
+  const llms = await fetcher.get(new URL('/llms.txt', base).toString());
+  const hasLlms = !absent(llms);
+  if (!hasLlms) {
+    out.push(f('info', 'llms-missing', 'No llms.txt',
+      'The emerging convention for telling AI assistants what a site is and which pages matter.', llms.url));
+  }
+
+  // --- Who the answer engines are allowed to be ---------------------------
+  // Asked of robots.txt, which the site already serves, rather than estimated:
+  // the AI crawlers obey it like anything else, so the site's position is
+  // already written down. Blocking them is a legitimate decision and the
+  // finding says so — what this is for is the block nobody chose.
+  if (aiGroups) {
+    const access = aiAccess(aiGroups, robotsVerdict);
+    const shut = describeAccess(access);
+    if (shut) {
+      out.push(f('info', 'ai-crawler-blocked',
+        `${plural(shut.blocked.length, 'AI crawler')} are disallowed by robots.txt`,
+        shut.detail, robotsUrl));
+
+      // The site contradicting itself. llms.txt exists to tell an AI assistant
+      // what a site is and which pages matter; a Disallow tells the same
+      // assistant not to come. One of the two files is wrong, and unlike the
+      // block itself this is never something anybody chose.
+      if (hasLlms && shut.answering.length) {
+        out.push(f('warn', 'ai-crawler-conflict',
+          'llms.txt invites AI assistants that robots.txt turns away',
+          `This site serves llms.txt — a file whose only purpose is to tell an AI assistant what to read ` +
+            `— and robots.txt disallows ${shut.answering.map((row) => row.agent.name).join(', ')}, which ` +
+            'is how those assistants fetch a page when somebody asks a question. The invitation never ' +
+            'gets read. Either drop the Disallow or drop llms.txt.', llms.url));
+      }
+    }
+  }
+
+  // --- Soft 404s ----------------------------------------------------------
+  // A URL that cannot exist has to answer 404. When it answers 200 instead,
+  // every typo, every stale inbound link and every crawler guess becomes an
+  // indexable page, and the site quietly fills the index with copies of its own
+  // error page. Nothing on the site reveals this — you have to ask for
+  // something missing, which no visitor and no single-page grader ever does.
+  //
+  // A fixed path rather than a random one, so the finding is identical between
+  // runs and --baseline has something stable to compare.
+  // The chain is followed and only the *final* answer judged, because the first
+  // hop says almost nothing. Two real behaviours seen in the wild: wikipedia.org
+  // answers 301 and then 404, which is correct and must stay silent; vercel.com
+  // answers 308 to strip the trailing slash and then 200, which is a soft 404
+  // that reading only the first hop would miss entirely.
+  const probe = new URL('/seo-audit-probe-404/', base).toString();
+  const { hops, final } = await fetcher.chain(probe);
+  const servedHtml = /text\/html/i.test(final.headers.get('content-type') ?? '');
+
+  if (final.status === 200 && servedHtml) {
+    // hops already includes the final response, so it is not appended again.
+    const route =
+      hops.length > 1
+        ? `answers ${hops.map((h) => h.status).join(' → ')}, ending at ${final.url}`
+        : 'answers 200 directly';
+    const landedHome = final.url.replace(/\/$/, '') === base.origin.replace(/\/$/, '');
+    // A 200 that says noindex is a deliberate mitigation rather than an
+    // oversight: still wrong, because Google wants the status code, but the page
+    // will not be indexed and the damage stops there.
+    const metaRobots = final.body.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] ?? '';
+    const noindexed =
+      /noindex/i.test(metaRobots) || /noindex/i.test(final.headers.get('x-robots-tag') ?? '');
+
+    if (landedHome) {
+      out.push(f('warn', 'soft-404', 'Missing pages end up on the homepage instead of 404ing',
+        `${probe} ${route}. Google treats this as a soft 404 regardless, and a visitor who followed a ` +
+          'broken link lands on the homepage with no idea what went wrong.', probe));
+    } else if (noindexed) {
+      out.push(f('warn', 'soft-404', 'A page that does not exist answers 200, but is noindexed',
+        `${probe} ${route}. The noindex keeps it out of the index, but crawlers still spend budget on ` +
+          'every missing URL, and nothing tells a visitor the link is dead.', probe));
+    } else {
+      out.push(f('error', 'soft-404', 'A page that does not exist answers 200',
+        `${probe} ${route}, with an HTML body. Every mistyped or stale URL is a live, indexable page, ` +
+          'so the index fills with copies of the error page. Return a real 404.', probe));
+    }
+  }
+
+  // --- Favicon ------------------------------------------------------------
+  // Google draws one beside every result a site owns, and shows a default globe
+  // where it finds none. It reads the declaration from the home page and
+  // accepts three rel values: icon, apple-touch-icon and
+  // apple-touch-icon-precomposed.
+  //
+  // Only two things are reported, and both are facts: a declared icon that is
+  // not there, and no declaration with nothing at /favicon.ico either. A site
+  // serving one from a path it never declared is working exactly as intended,
+  // and guessing otherwise would be inventing a finding.
+  const homePage = pages.find((p) => {
+    try {
+      return p.doc && new URL(p.url).pathname.replace(/\/$/, '') === '';
+    } catch {
+      return false;
+    }
+  });
+  // The home page is not always in the sitemap — eslint.org's lists 499 URLs
+  // and not that one — so it is fetched when it was not crawled. The fetcher
+  // caches, and the audit has already asked for it to settle the host, so this
+  // costs nothing.
+  let homeDoc = homePage?.doc;
+  if (!homeDoc) {
+    const res = await fetcher.get(`${origin}/`);
+    if (res.ok && /text\/html/i.test(res.headers.get('content-type') ?? '')) {
+      homeDoc = parseHtml(res.body, `${origin}/`);
+    }
+  }
+  const declared = homeDoc?.icons?.[0];
+  // `data:,` is the empty data URI people use to stop a browser asking for a
+  // favicon at all. example.com and motherfuckingwebsite.com both ship it. It
+  // is a deliberate choice and there is nothing to fetch, so it is left alone.
+  if (homeDoc && !/^data:/i.test(declared ?? '')) {
+    const target = declared ?? new URL('/favicon.ico', origin).toString();
+    const res = await fetcher.get(target);
+    const type = res.headers.get('content-type') ?? '';
+    // 403 is hotlink protection working as designed, the same judgement the
+    // og:image sweep makes. Only an answer that means "not here" counts — and
+    // a page counts, because the catch-all handler answering 200 with HTML
+    // reaches a search engine as no icon just as surely as a 404 does.
+    const missing = absent(res);
+    const isPage = res.ok && /text\/html/i.test(type);
+    const because = missing
+      ? `answers ${res.status || res.error}`
+      : `answers 200 with ${type.split(';')[0]} — the site's catch-all handler rather than an icon`;
+
+    if (missing || isPage) {
+      if (declared) {
+        out.push(f('warn', 'favicon-broken', 'The declared favicon does not load',
+          `${target} ${because}. The home page asks for it by name, so search results fall back to a ` +
+            'default icon on every page of the site.', origin));
+      } else {
+        out.push(f('info', 'favicon-missing', 'No favicon',
+          `The home page declares none and ${target} ${because}. Search results show a default icon ` +
+            'beside every page of the site. Google wants a square, at least 8×8 and better above 48×48.',
+          origin));
+      }
+    }
+  }
+
+  // --- Canonical host and scheme -----------------------------------------
+  // One hop is right. Two means every visitor pays for a wasted round trip.
+  //
+  // `www.` is only meaningful for a registrable domain. An IP address has no
+  // www, and neither does a bare hostname like localhost — asking a resolver
+  // for `www.127.0.0.1` is a question with no sensible answer, which it may
+  // decline quickly or sit on for as long as it likes. That is what made the
+  // fixture tests, which run against 127.0.0.1, stall unpredictably.
+  const authority = base.host.replace(/^www\./, ''); // keeps any port
+  const isAddress = /^\[?[\d.:]+\]?$/.test(base.hostname);
+  const hasRegistrableDomain = !isAddress && base.hostname.replace(/^www\./, '').includes('.');
+  const variants = [
+    `http://${authority}/`,
+    ...(hasRegistrableDomain ? [`https://www.${authority}/`, `http://www.${authority}/`] : []),
+  ];
+  for (const variant of variants) {
+    const { hops, final } = await fetcher.chain(variant);
+    if (final.status === 429) {
+      // "Ask later" is not "dead". Calling a variant broken because the server
+      // declined to answer this crawler reports the crawl as a fault of the
+      // site — and it is the canonical host that gets called dead most often,
+      // because it is the one the crawl has already been hammering.
+      out.push(f('info', 'host-variant-not-checked', `${variant} was not checked`,
+        'The server answered HTTP 429 — asking for a slower crawl — so whether this variant reaches ' +
+          'a page is not known. Run it again with a lower --concurrency.', variant));
+    } else if (!final.ok) {
+      out.push(f('warn', 'host-variant-dead', `${variant} does not resolve to a page`,
+        final.error ? `Request failed: ${final.error}` : `Ends at HTTP ${final.status}`, variant));
+    } else if (hops.length > 2) {
+      out.push(f('warn', 'redirect-chain', `${variant} takes ${hops.length - 1} redirects`,
+        hops.map((h) => `${h.status} ${h.url}`).join(' → '), variant));
+    }
+  }
+
+  // --- Certificate --------------------------------------------------------
+  // Not an SEO check, and the only thing here that takes a site off the
+  // internet completely. A browser refuses to load an expired certificate, so
+  // the ranking becomes irrelevant along with everything else.
+  if (base.protocol === 'https:') {
+    // Injectable so the thresholds can be tested without a live certificate
+    // that would have to be reissued to keep the test meaningful.
+    const readExpiry = opts.readCertificateExpiry ?? certificateExpiry;
+    const expiresAt = await readExpiry(base.hostname);
+    if (expiresAt) {
+      const days = Math.floor((expiresAt - (opts.now ?? Date.now())) / DAY);
+      const on = new Date(expiresAt).toISOString().slice(0, 10);
+      if (days < 0) {
+        out.push(f('error', 'tls-expired', `The TLS certificate expired ${plural(-days, 'day')} ago`,
+          `It ran out on ${on}. Browsers refuse to load the site, so nothing else in this report matters ` +
+            'until it is renewed.', origin));
+      } else if (days <= CERT_WARN_DAYS) {
+        out.push(f('warn', 'tls-expiring', `The TLS certificate expires in ${plural(days, 'day')}`,
+          `On ${on}. Usually this means automatic renewal has stopped without anyone noticing — the ` +
+            'certificates that lapse are the ones nobody was worried about.', origin));
+      }
+    }
+  }
+
+  // --- Security headers ---------------------------------------------------
+  const home = await fetcher.get(base.origin + '/');
+  const header = (name) => home.headers.get(name);
+  const expected = [
+    ['strict-transport-security', 'warn', 'HSTS not set', 'Browsers will try HTTP first on the next visit.'],
+    ['x-content-type-options', 'info', 'X-Content-Type-Options not set', 'nosniff stops MIME-type guessing.'],
+    ['referrer-policy', 'info', 'Referrer-Policy not set', 'Full URLs leak to third parties by default.'],
+    ['content-security-policy', 'info', 'No Content-Security-Policy', 'The strongest defence against injected scripts.'],
+  ];
+  for (const [name, level, title, detail] of expected) {
+    if (!header(name)) out.push(f(level, `header-${name}`, title, detail, home.url));
+  }
+
+  // --- Broken internal links ---------------------------------------------
+  // Every internal href on every crawled page, checked once.
+  const known = new Set(pages.map((p) => p.url.replace(/\/$/, '')));
+  // Cloudflare rewrites mailto: links to /cdn-cgi/l/email-protection, which
+  // answers 404 to anything that is not a browser running their script. It is
+  // not a broken link, it is an anti-spam measure working as designed.
+  const notReallyBroken = /\/cdn-cgi\//;
+  const seen = new Map(); // target → pages linking to it
+  for (const page of pages) {
+    for (const href of page.doc?.links.internal ?? []) {
+      const clean = href.split('#')[0];
+      const bare = clean.replace(/\/$/, '');
+      if (known.has(bare) || inSitemap.has(bare) || notReallyBroken.test(clean)) continue;
+      seen.set(clean, [...(seen.get(clean) ?? []), page.url]);
+    }
+  }
+  // Both questions below — is the target broken, and is it missing from the
+  // sitemap — are answered by the same response, so ask once and read it twice.
+  //
+  // The fetcher caches, so the old second pass was free for anything already
+  // checked. What it was not free for was everything past maxLinkChecks: that
+  // pass looped over every target, uncapped and one at a time, so the cap
+  // bounded the broken-link check but not the run. A site with 500 link targets
+  // paid for 300 serial requests that nothing was capping.
+  const all = [...seen.keys()];
+  const limit = opts.maxLinkChecks ?? 200;
+  const targets = all.slice(0, limit);
+  opts.onProgress?.({ phase: 'links', detail: `${targets.length} distinct targets to check` });
+  const results = await mapLimit(targets, 6, async (target) => {
+    const res = await fetcher.get(target, { keepBody: false });
+    opts.onProgress?.({ phase: 'links', status: res.status, ms: res.ms, url: target });
+    const type = res.headers.get('content-type') ?? '';
+    // A third question the same response answers — and the only place it can be
+    // asked. A sitemap does not list page 2 of an archive: across css-tricks,
+    // wordpress.org and smashingmagazine, 0 of 9,273 sitemap URLs were
+    // paginated, so these pages are met here or not at all.
+    //
+    // Read now rather than by keeping the body: a sweep of two hundred targets
+    // holding two hundred documents in memory to read one tag out of a handful
+    // of them is not a trade worth making.
+    const canonical =
+      res.ok && /text\/html/i.test(type) && seriesOf(target).page > 1
+        ? (parseHtml(res.body, target).canonical?.[0] ?? null)
+        : null;
+    return { target, status: res.status, type, canonical };
+  });
+
+  if (all.length > targets.length) {
+    out.push(f('info', 'link-sweep-capped', `${all.length - targets.length} link targets were not checked`,
+      `The sweep stops at ${limit} distinct targets. Raise it with maxLinkChecks in the config — ` +
+        'the rest of this section describes only what was actually fetched.', origin));
+  }
+
+  // Iterated in link order rather than whichever request finished first, so two
+  // runs of an unchanged site produce the same report and --baseline stays
+  // meaningful.
+  for (const { target, status } of results) {
+    if (status === 404 || status === 0) {
+      out.push(f('error', 'broken-link', 'Link to a page that does not exist',
+        `${target} — linked from ${seen.get(target).slice(0, 3).join(', ')}`, seen.get(target)[0]));
+    }
+  }
+
+  for (const { target, canonical } of results) {
+    const finding = paginatedCanonical(target, canonical);
+    if (finding) out.push(finding);
+  }
+
+  // Linked, reachable, and absent from the sitemap — the mirror image of an
+  // orphan, and just as easy to ship by accident when a route is added.
+  //
+  // Silent when the crawl followed links rather than a sitemap: every page
+  // found that way is by definition absent from a sitemap that does not exist,
+  // and saying so once per page would bury the finding that matters, which is
+  // that there is no sitemap at all.
+  const missing =
+    opts.bySitemap === false
+      ? []
+      : results.filter((r) => r.status === 200 && /text\/html/i.test(r.type));
+  for (const { target } of missing.slice(0, 20)) {
+    out.push(f('warn', 'missing-from-sitemap', 'Page is linked but not in the sitemap',
+      `${target} — linked from ${seen.get(target).slice(0, 2).join(', ')}`, target));
+  }
+  if (missing.length > 20) {
+    out.push(f('info', 'missing-from-sitemap-more', `${missing.length - 20} more pages are linked but not in the sitemap`,
+      `${missing.length} in total; the first 20 are listed above. This usually means one route or ` +
+        'section never made it into the generator’s sitemap, so look for the pattern rather than fixing them one by one.', origin));
+  }
+
+  // An internal link that redirects still works, so it is never urgent — but
+  // every one of them spends a round trip that a visitor and a crawler both
+  // pay for, and they accumulate silently after a URL structure changes.
+  // Aggregated and filed as a note: keeping an old permalink alive on purpose
+  // is a legitimate reason to have one.
+  const redirecting = results.filter((r) => r.status >= 300 && r.status < 400);
+  if (redirecting.length) {
+    out.push(f('info', 'link-redirects', `${plural(redirecting.length, 'internal link')} point at a redirect`,
+      `First: ${redirecting.slice(0, 3).map((r) => `${r.target} (${r.status})`).join(', ')}. ` +
+        'Linking to the final URL saves the hop.', origin));
+  }
+
+  // --- Images that do not load --------------------------------------------
+  // The link sweep above reads anchors only, so a broken <img> on page 23 has
+  // never been visible to this tool — which is the exact shape of bug it was
+  // written for.
+  //
+  // Deliberately conservative about what counts as broken. A 403 is the
+  // signature of hotlink protection working as designed, not of a missing file,
+  // and reporting those would be the /cdn-cgi/ mistake a second time.
+  // Counted by file rather than by URL. An image CDN serves one file at every
+  // size asked for — /cdn/shop/files/DSC_0075-2.avif?v=…&width=150, &width=300,
+  // &width=750 — and each of those used to be a separate entry against the cap.
+  // Measured across 45 pages of a real store: 767 distinct URLs, 488 distinct
+  // files, so a third of the sweep was asking the same question again.
+  //
+  // Only the size knobs are dropped. `v` stays: a different version is a
+  // different asset and a stale one really can 404, which is a finding worth
+  // keeping. The trade is that one size is checked on behalf of the others —
+  // if a CDN refuses an unusual width the sweep will miss it, which errs
+  // towards saying nothing rather than towards saying something wrong.
+  const SIZE_PARAMS = ['width', 'height', 'w', 'h', 'dpr'];
+  const imageFile = (url) => {
+    try {
+      const u = new URL(url);
+      for (const param of SIZE_PARAMS) u.searchParams.delete(param);
+      return u.toString();
+    } catch {
+      return url;
+    }
+  };
+
+  const imageSources = new Map();
+  for (const page of pages) {
+    for (const img of page.doc?.images ?? []) {
+      if (!img.src || /^data:/i.test(img.src)) continue;
+      let absolute;
+      try {
+        absolute = new URL(img.src, page.url).toString();
+      } catch {
+        continue;
+      }
+      const file = imageFile(absolute);
+      if (!imageSources.has(file)) imageSources.set(file, { src: absolute, page: page.url });
+    }
+  }
+  const imageLimit = opts.maxImageChecks ?? 200;
+  const imageTargets = [...imageSources.values()].slice(0, imageLimit).map((entry) => entry.src);
+  opts.onProgress?.({ phase: 'images', detail: `${imageTargets.length} distinct images to check` });
+  const imageResults = await mapLimit(imageTargets, 6, async (src) => {
+    let res = await fetcher.get(src, { method: 'HEAD', keepBody: false });
+    // Some hosts answer HEAD with 405 or 501 and serve the file perfectly well.
+    if (res.status === 405 || res.status === 501) res = await fetcher.get(src, { keepBody: false });
+    opts.onProgress?.({ phase: 'images', status: res.status, ms: res.ms, url: src });
+    return { src, status: res.status, error: res.error };
+  });
+  // In source order, not completion order, so two runs of an unchanged site
+  // produce the same report.
+  for (const { src, status, error } of imageResults) {
+    if (status === 404 || status === 410 || status === 0) {
+      const on = imageSources.get(imageFile(src))?.page;
+      out.push(f('error', 'broken-image', 'Image does not load',
+        `HTTP ${status || error} for ${src} — used on ${on}.`, on));
+    }
+  }
+  if (imageSources.size > imageTargets.length) {
+    out.push(f('info', 'image-sweep-capped', `${imageSources.size - imageTargets.length} images were not checked`,
+      `The sweep stops at ${imageLimit} distinct files and this site has ${imageSources.size}. Set ` +
+        `"maxImageChecks": ${imageSources.size} in the config to check them all — each one is a request, ` +
+        'so a large catalogue is a long run.', origin));
+  }
+
+  // --- Outbound links -------------------------------------------------------
+  // Off by default, and that is a judgement rather than laziness. These are
+  // other people's servers: they rate-limit, they bot-block, they answer 403 to
+  // anything without a browser's fingerprint. Reporting that as a broken link
+  // would be the most productive false positive this tool could invent, so only
+  // 404, 410 and a dead connection count — and even then it is opt-in, because
+  // one machine hammering a hundred third parties is rude at scale.
+  if (opts.checkExternal) {
+    const outbound = new Map();
+    for (const page of pages) {
+      for (const href of page.doc?.links.external ?? []) {
+        if (!/^https?:/i.test(href)) continue;
+        if (!outbound.has(href)) outbound.set(href, page.url);
+      }
+    }
+    const externalLimit = opts.maxExternalChecks ?? 100;
+    const externalTargets = [...outbound.keys()].slice(0, externalLimit);
+    opts.onProgress?.({ phase: 'external', detail: `${externalTargets.length} outbound links to check` });
+
+    const externalResults = await mapLimit(externalTargets, 4, async (href) => {
+      const { hops, final } = await fetcher.chain(href);
+      opts.onProgress?.({ phase: 'external', status: final.status, ms: final.ms, url: href });
+      return { href, first: hops[0]?.status ?? 0, final };
+    });
+
+    const dead = externalResults.filter(
+      (r) => r.final.status === 404 || r.final.status === 410 || r.final.status === 0,
+    );
+    if (dead.length) {
+      out.push(f('warn', 'external-broken', `${plural(dead.length, 'outbound link')} do not resolve`,
+        `${dead.slice(0, 3).map((r) => `${r.href} (${r.final.status || r.final.error})`).join(', ')}` +
+          `${dead.length > 3 ? `, and ${dead.length - 3} more` : ''}. A link out that goes nowhere is a dead ` +
+          'end for a reader. Checked leniently — anything but a 404, a 410 or no answer at all is left alone.',
+        origin));
+    }
+
+    const moved = externalResults.filter((r) => r.first >= 300 && r.first < 400 && r.final.ok);
+    if (moved.length) {
+      out.push(f('info', 'external-redirects', `${plural(moved.length, 'outbound link')} point at a redirect`,
+        `${moved.slice(0, 3).map((r) => `${r.href} → ${r.final.url}`).join(', ')}` +
+          `${moved.length > 3 ? `, and ${moved.length - 3} more` : ''}. They work; linking to the final ` +
+          'URL is tidier and survives the day the redirect is removed.', origin));
+    }
+
+    if (outbound.size > externalTargets.length) {
+      out.push(f('info', 'external-sweep-capped', `${outbound.size - externalTargets.length} outbound links were not checked`,
+        `The sweep stops at ${externalLimit}. Raise it with maxExternalChecks.`, origin));
+    }
+  }
+
+  // --- Images named in structured data ------------------------------------
+  // A logo or an image Google is told to use for a rich result, that does not
+  // load. Nothing on the page looks wrong — the markup is valid and the file is
+  // simply gone, usually a media library tidied up years after the JSON-LD was
+  // written. Same conservative rule as everywhere else: 404, 410 or no answer.
+  const schemaImages = new Map();
+  for (const page of pages) {
+    for (const node of schemaNodes(page.doc?.jsonld)) {
+      for (const key of ['image', 'logo', 'thumbnailUrl', 'contentUrl']) {
+        for (const value of [node[key]].flat()) {
+          const href = typeof value === 'string' ? value : value?.url;
+          if (typeof href !== 'string' || !/^https?:/i.test(href)) continue;
+          if (!schemaImages.has(href)) schemaImages.set(href, page.url);
+        }
+      }
+    }
+  }
+  const schemaTargets = [...schemaImages.keys()].slice(0, opts.maxImageChecks ?? 200);
+  const schemaResults = await mapLimit(schemaTargets, 4, async (href) => {
+    let res = await fetcher.get(href, { method: 'HEAD', keepBody: false });
+    if (res.status === 405 || res.status === 501) res = await fetcher.get(href, { keepBody: false });
+    return { href, status: res.status, error: res.error };
+  });
+  const deadSchemaImages = schemaResults.filter(
+    (r) => r.status === 404 || r.status === 410 || r.status === 0,
+  );
+  if (deadSchemaImages.length) {
+    out.push(f('warn', 'schema-image-broken', `${plural(deadSchemaImages.length, 'image')} named in structured data do not load`,
+      `${deadSchemaImages.slice(0, 3).map((r) => `${r.href} (${r.status || r.error})`).join(', ')}` +
+        `${deadSchemaImages.length > 3 ? `, and ${deadSchemaImages.length - 3} more` : ''}. Google is told to ` +
+        'use these for rich results and finds nothing there. The markup is valid, so nothing else reports it.',
+      deadSchemaImages[0] ? schemaImages.get(deadSchemaImages[0].href) : origin));
+  }
+
+  // --- hreflang targets load ----------------------------------------------
+  // A version that does not load is dropped from the set, and the pages that
+  // pointed at it lose the annotation with it. Targets already crawled and
+  // answering 200 are not asked again; the interesting ones are the alternates
+  // outside the crawl, which is where a stale translation URL survives.
+  const crawledOk = new Set(pages.filter((p) => p.res.ok).map((p) => p.url.replace(/\/$/, '')));
+  const alternates = new Map();
+  for (const page of pages) {
+    for (const alt of page.doc?.hreflang ?? []) {
+      if (!alt.href || crawledOk.has(alt.href.replace(/\/$/, ''))) continue;
+      if (!alternates.has(alt.href)) alternates.set(alt.href, page.url);
+    }
+  }
+  const alternateResults = await mapLimit(
+    [...alternates.keys()].slice(0, limit),
+    6,
+    async (href) => {
+      const res = await fetcher.get(href);
+      return { href, status: res.status, error: res.error };
+    },
+  );
+  // Grouped by the page that declares them. A translated site tends to carry
+  // one alternate per locale, so a single broken page can produce forty
+  // identical findings — wordpress.org declares fifty-two locale subdomains for
+  // a page that exists in seven of them. One finding per page, naming a few.
+  const deadByPage = new Map();
+  for (const { href, status, error } of alternateResults) {
+    if (status !== 404 && status !== 410 && status !== 0) continue;
+    const source = alternates.get(href);
+    deadByPage.set(source, [...(deadByPage.get(source) ?? []), `${href} (${status || error})`]);
+  }
+  for (const [source, dead] of deadByPage) {
+    const shown = dead.slice(0, 3).join(', ');
+    out.push(f('error', 'hreflang-dead', `${plural(dead.length, 'hreflang target')} do not load`,
+      `${shown}${dead.length > 3 ? `, and ${dead.length - 3} more` : ''} — declared on ${source}. Each ` +
+        'version that does not load drops out of the set, and the pages pointing at it lose the annotation.',
+      source));
+  }
+
+  // --- Canonical targets --------------------------------------------------
+  // A canonical pointing at a redirect or a 404 is worse than none: Google is
+  // told the real page lives somewhere that does not answer.
+  const canonicals = new Map();
+  for (const page of pages) {
+    const target = page.doc?.canonical?.[0];
+    if (!target) continue;
+    if (target.replace(/\/$/, '') === page.url.replace(/\/$/, '')) continue;
+    canonicals.set(target, page.url);
+  }
+  const canonicalResults = await mapLimit([...canonicals.keys()], 4, async (target) => {
+    const res = await fetcher.get(target);
+    return { target, res };
+  });
+  for (const { target, res } of canonicalResults) {
+    const from = canonicals.get(target);
+    if (res.status >= 300 && res.status < 400) {
+      out.push(f('error', 'canonical-redirects', 'Canonical points at a redirect',
+        `${target} answers ${res.status}. Point it at the final URL.`, from));
+      continue;
+    }
+    if (!res.ok) {
+      out.push(f('error', 'canonical-dead', 'Canonical points at a page that does not load',
+        `${target} answers ${res.status}.`, from));
+      continue;
+    }
+    if (!/text\/html/i.test(res.headers.get('content-type') ?? '')) continue;
+    const targetDoc = parseHtml(res.body, target);
+
+    // The target loads, and it says not to index it. A canonical is a request
+    // to index B in place of A, so A follows B out of the index and takes the
+    // page that was actually meant to rank with it. Nothing on A shows this:
+    // its own markup is correct, and the instruction that removes it lives on
+    // a different page — or, worse, in a header that no view-source reveals.
+    const targetRobots = `${targetDoc.robots ?? ''} ${res.headers?.get?.('x-robots-tag') ?? ''}`;
+    if (/noindex/i.test(targetRobots)) {
+      out.push(f('error', 'canonical-noindex', 'Canonical points at a noindexed page',
+        `${target} is noindex ("${targetRobots.trim()}"), and ${from} hands its indexing over to it. ` +
+          'Both pages leave the index: the target because it asked to, and this one because it named ' +
+          'the target as the version to keep.', from));
+      continue;
+    }
+
+    // The target loads — but does it claim to be canonical itself? A → B where
+    // B hands off to C makes Google follow a chain it is under no obligation to
+    // follow, and the page that started it can end up consolidated nowhere.
+    const theirs = targetDoc.canonical?.[0];
+    if (theirs && theirs.replace(/\/$/, '') !== target.replace(/\/$/, '')) {
+      out.push(f('warn', 'canonical-chain', 'Canonical points at a page that canonicals somewhere else',
+        `${from} → ${target} → ${theirs}. Google is not obliged to follow a chain; point the first ` +
+          'canonical at the page that actually claims itself.', from));
+    }
+  }
+
+  // --- Trailing slashes ---------------------------------------------------
+  // Both forms serving 200 is two URLs for one page, and Google will pick one
+  // for you. A redirect between them is correct; two live copies are not.
+  const sample = pages.filter((p) => p.res.ok && new URL(p.url).pathname !== '/').slice(0, 12);
+  let inconsistent = 0;
+  await mapLimit(sample, 4, async (page) => {
+    const url = new URL(page.url);
+    const flipped = url.pathname.endsWith('/')
+      ? page.url.replace(/\/$/, '')
+      : `${page.url}/`;
+    const res = await fetcher.get(flipped);
+    if (res.status === 200) inconsistent++;
+  });
+  if (inconsistent) {
+    out.push(f('warn', 'trailing-slash', 'Pages answer with and without a trailing slash',
+      `${inconsistent} of ${sample.length} sampled pages load both ways, which is two URLs for one page. ` +
+        'One form should redirect to the other.', origin));
+  }
+
+  // --- Social images actually load ---------------------------------------
+  const ogImages = new Map();
+  for (const page of pages) {
+    const src = page.doc?.og['og:image'];
+    // A relative og:image is reported as og-image-relative by the page checks,
+    // which explains the actual problem. Fetching it here would only add a
+    // second, vaguer finding about the same tag.
+    if (src && /^(https?:)?\/\//i.test(src)) ogImages.set(src, page.url);
+  }
+  // The chain is followed and only the final answer judged. An og:image on
+  // http:// that 301s to https loads perfectly well — every scraper follows it —
+  // and allbirds.com had seven of those reported as previewing blank.
+  //
+  // Conservative about what counts as broken, for the same reason as the image
+  // sweep: 403 is hotlink protection working, not a missing file.
+  const ogResults = await mapLimit([...ogImages.keys()], 4, async (src) => {
+    const { final } = await fetcher.chain(src, 5, { keepBody: false });
+    return { src, final };
+  });
+  for (const { src, final } of ogResults) {
+    if (final.status === 404 || final.status === 410 || final.status === 0) {
+      out.push(f('error', 'og-image-broken', 'og:image does not load',
+        `HTTP ${final.status || final.error} for ${src} — shared links will preview blank.`,
+        ogImages.get(src)));
+      continue;
+    }
+    const bytes = Number(final.headers.get('content-length') ?? 0);
+    if (bytes > 5_000_000) {
+      out.push(f('warn', 'og-image-heavy', 'og:image is very large',
+        `${(bytes / 1e6).toFixed(1)}MB — some scrapers give up before downloading it.`, ogImages.get(src)));
+    }
+  }
+
+  // twitter:image, and only when it is a different picture from og:image.
+  //
+  // The *absence* of a Twitter card is deliberately not a finding and stays
+  // that way: X falls back to Open Graph correctly, so reporting it would
+  // invent a defect. A twitter:image that is declared and does not load is the
+  // opposite case — nothing falls back to anything, and the one platform that
+  // was handed its own tag previews blank. Same conservatism as above: a 403 is
+  // hotlink protection working.
+  const twitterImages = new Map();
+  for (const page of pages) {
+    const src = page.doc?.twitter?.['twitter:image'];
+    if (!src || !/^(https?:)?\/\//i.test(src)) continue;
+    // Identical to og:image means the sweep above already judged this picture.
+    // Two findings about one file is the noise this project keeps refusing.
+    if (src === page.doc?.og?.['og:image']) continue;
+    twitterImages.set(src, page.url);
+  }
+  const twitterResults = await mapLimit([...twitterImages.keys()], 4, async (src) => {
+    const { final } = await fetcher.chain(src, 5, { keepBody: false });
+    return { src, final };
+  });
+  for (const { src, final } of twitterResults) {
+    if (final.status === 404 || final.status === 410 || final.status === 0) {
+      out.push(f('error', 'twitter-image-broken', 'twitter:image does not load',
+        `HTTP ${final.status || final.error} for ${src} — it differs from og:image, so X has nothing to fall back to.`,
+        twitterImages.get(src)));
+    }
+  }
+
+  return out;
+}
+
+// --- Every other host on the domain -----------------------------------------
+//
+// The rest of this file audits the site it was pointed at. This asks a
+// different question: what *else* is on this domain, and is any of it damaging
+// the site that was.
+//
+// Three things come out of it, and all three are invisible to a crawl of the
+// site itself, which is the reason it exists at all:
+//
+//   * a staging copy nobody remembered to close, indexable, competing with
+//     production for its own results and publishing whatever was being tested;
+//   * a subdomain whose CNAME points at a service that is gone, which anybody
+//     can claim and then serve from the client's own domain;
+//   * a second host serving the same site again, splitting its signals.
+//
+// The discovery is certificate transparency and the verification is this tool's
+// own fetcher, and that split is the whole design. CT is a log of every
+// certificate ever issued: it is the only free, keyless, complete source of
+// hostnames, and it is a terrible list of *live* ones — three quarters of what
+// it returns for a large domain stopped existing years ago. So nothing from the
+// log is ever reported. It produces candidates; DNS and an HTTP request decide
+// which of them are facts. A finding here has been resolved and fetched.
+//
+// Off by default. It is one slow third-party lookup plus a lookup per candidate,
+// and a crawl should not quietly spend that.
+
+/** Names that are the site itself rather than a sibling. */
+const canonicalNames = (base) => new Set([base.hostname, base.hostname.replace(/^www\./, ''),
+  `www.${base.hostname.replace(/^www\./, '')}`]);
+
+/** Whether a response forbids indexing, by either of the two routes Google
+ *  reads it from. The same test the soft-404 check makes, for the same reason:
+ *  a noindexed copy is a mistake somebody already mitigated. */
+function noindexed(res) {
+  const meta = res.body?.match(/<meta[^>]+name=["']robots["'][^>]*>/i)?.[0] ?? '';
+  return /noindex/i.test(meta) || /noindex/i.test(res.headers?.get?.('x-robots-tag') ?? '');
+}
+
+/**
+ * Sibling hosts, and what is wrong with them.
+ *
+ * Returns findings *and* the inventory behind them, because a reader who is
+ * told a domain has a leaked staging host is owed the list the tool actually
+ * looked at — including the part it did not reach.
+ *
+ * @returns {Promise<{findings: object[], hosts: object|null}>}
+ */
+export async function hostChecks(origin, fetcher, opts = {}) {
+  const out = [];
+  const base = new URL(origin);
+  const apex = base.hostname.replace(/^www\./, '');
+
+  // An IP address and a bare hostname have no domain to enumerate, and asking
+  // the log about one is a question with no sensible answer. The same guard the
+  // www variants use, for the same reason.
+  const isAddress = /^\[?[\d.:]+\]?$/.test(base.hostname);
+  if (isAddress || !apex.includes('.')) return { findings: out, hosts: null };
+
+  // Injectable so the tests never touch the network, and so a network that
+  // blocks either service can be pointed somewhere that answers.
+  const lookup = opts.resolveDns ?? resolveDns;
+  const fromLog = opts.certificateNames ?? certificateNames;
+  const dnsOpts = opts.dnsOptions ?? {};
+
+  const log = await fromLog(apex, dnsOpts);
+  if (log === null) {
+    // A log that did not answer is not a domain with no other hosts. Saying so
+    // is the same rule `tls-not-checked` and `sitemap-not-checked` follow: a
+    // check that could not run says it could not run, because a missing finding
+    // reads exactly like a passing one.
+    out.push(f('info', 'hosts-not-checked', 'Other hosts on this domain were not enumerated',
+      'No certificate transparency log answered, so this run cannot say whether the domain serves ' +
+        'anything besides the site that was audited. Nothing about the site itself is affected. Try ' +
+        'again — these logs are free and unauthenticated, and they rate-limit and time out ' +
+        'accordingly.', origin));
+    return { findings: out, hosts: null };
+  }
+
+  const mine = canonicalNames(base);
+  const ranked = rankHosts(collapseFleets(log.names), apex);
+  const limit = opts.maxHostChecks ?? 40;
+  const targets = ranked.slice(0, limit);
+  opts.onProgress?.({ phase: 'hosts', detail: `${targets.length} of ${ranked.length} hostnames to resolve` });
+
+  if (ranked.length > targets.length) {
+    out.push(f('info', 'host-sweep-capped', `${ranked.length - targets.length} hostnames were not looked up`,
+      `The log named ${ranked.length} distinct hosts for this domain and the sweep stops at ${limit}, ` +
+        'environment names first. Raise it with maxHostChecks in the config — the rest of this section ' +
+        'describes only what was actually resolved.', origin));
+  }
+
+  // --- Resolve ------------------------------------------------------------
+  const resolved = await mapLimit(targets, 8, async (host) => {
+    const a = await lookup(host, 'A', dnsOpts);
+    const alias = a.cname.at(-1) ?? null;
+
+    // A dangling CNAME: the alias is there and what it points at is not.
+    //
+    // Most resolvers answer NXDOMAIN for the whole query when the chain ends in
+    // a name that does not exist, so usually one lookup settles it. Some answer
+    // NOERROR with no address instead, so that case is chased explicitly rather
+    // than guessed at — this is the finding that accuses somebody's live domain
+    // of being claimable, and it is not allowed to be approximate.
+    let dangling = false;
+    if (alias) {
+      if (a.ok && a.status === NXDOMAIN) dangling = true;
+      else if (a.ok && !a.records.length) {
+        const chased = await lookup(alias, 'A', dnsOpts);
+        dangling = chased.ok && chased.status === NXDOMAIN;
+      }
+    }
+    opts.onProgress?.({ phase: 'hosts', url: host, detail: a.records.length ? a.records[0] : 'no address' });
+    return { host, addresses: a.records, cname: alias, dangling, live: a.ok && a.records.length > 0 };
+  });
+
+  for (const row of resolved) {
+    if (!row.dangling) continue;
+    out.push(f('error', 'subdomain-takeover', `${row.host} points at a service that no longer exists`,
+      `It is a CNAME to ${row.cname}, and that name does not resolve — the provider it was hosted on has ` +
+        'released it. Anybody can register the same name at that provider and serve whatever they like ' +
+        `from ${row.host}, which is a host on this domain and inherits its reputation. Delete the DNS ` +
+        'record, or point it back at something you own.', `https://${row.host}/`));
+  }
+
+  // --- Fetch what resolves ------------------------------------------------
+  // Only live hosts, and only their home page. The point is to establish what a
+  // search engine would find at each one, which the first page answers.
+  const live = resolved.filter((r) => r.live && !mine.has(r.host));
+  const fetchLimit = opts.maxHostFetches ?? 25;
+  const probed = await mapLimit(live.slice(0, fetchLimit), 4, async (row) => {
+    const { final } = await fetcher.chain(`https://${row.host}/`);
+    const type = final.headers?.get?.('content-type') ?? '';
+    const isHtml = /text\/html/i.test(type);
+    let landed = null;
+    let landedPath = null;
+    try {
+      const at = new URL(final.url);
+      landed = at.hostname;
+      landedPath = at.pathname;
+    } catch { /* an unparseable final URL is not a host to compare */ }
+    const doc = final.ok && isHtml && final.body ? parseHtml(final.body, final.url) : null;
+    return {
+      ...row,
+      status: final.status,
+      error: final.error ?? null,
+      isHtml,
+      // A sibling that redirects to the canonical host is the correct
+      // arrangement, not a finding — it is how a company parks an old name.
+      redirectsHome: Boolean(landed && mine.has(landed)),
+      // Where asking for this host's home page actually ended up.
+      landed,
+      landedPath,
+      // The one condition the staging and duplicate checks actually need: this
+      // host answered for its own root. Anything else — a redirect off to
+      // another host, or a bounce to a login page — means the host is not
+      // serving a copy of anything, whatever the final response says.
+      //
+      // Both real false positives this check has had were this, in different
+      // disguises. `dev.gtm.github.com` bounces to `/login`, which answers 200
+      // with HTML and no noindex. `dev.jquery.com` 301s to `bugs.jquery.com`,
+      // a different sibling, so the old redirectsHome test — which only knew
+      // about the canonical host — let it through and the landing path was `/`.
+      // One condition covers both and needs no vocabulary of login paths.
+      servesOwnRoot: landed === row.host && landedPath === '/',
+      noindex: final.ok ? noindexed(final) : false,
+      title: doc?.title ?? null,
+      canonical: doc?.canonical?.[0] ?? null,
+      fingerprint: doc?.fingerprint ?? null,
+    };
+  });
+
+  // --- A staging copy that is open to the index ---------------------------
+  //
+  // Narrow on purpose, and every clause is doing work. The name has to be an
+  // environment rather than a product — `beta.` and `demo.` are deliberately
+  // not in that list, because companies ship both. It has to actually serve a
+  // page. It must not already be handled: a `noindex`, a canonical pointing at
+  // production, or a robots.txt that disallows crawling are all somebody having
+  // thought about this, and reporting them would be the cry-wolf that gets a
+  // whole report ignored.
+  const staged = new Set();
+  for (const row of probed) {
+    if (!looksLikeStaging(row.host) || row.status !== 200 || !row.isHtml) continue;
+    if (row.noindex || !row.servesOwnRoot) continue;
+    // Its own robots.txt, not the site's. A staging host that blocks crawlers
+    // is a staging host somebody closed.
+    const robots = await fetcher.get(`https://${row.host}/robots.txt`);
+    if (robots.ok && !robotsVerdict(parseRobots(robots.body), '/').allowed) continue;
+    // A canonical pointing at production is the other legitimate arrangement.
+    let canonicalHost = null;
+    try {
+      canonicalHost = row.canonical ? new URL(row.canonical, `https://${row.host}/`).hostname : null;
+    } catch { /* a malformed canonical is not a defence */ }
+    if (canonicalHost && mine.has(canonicalHost)) continue;
+
+    staged.add(row.host);
+    out.push(f('warn', 'staging-indexable', `${row.host} is a live, indexable copy of the site`,
+      `It answers 200 with HTML${row.title ? ` and is titled “${row.title}”` : ''}, carries no noindex, ` +
+        'and nothing in its robots.txt or its canonical keeps it out of the index. A staging host that ' +
+        'Google can reach competes with production for its own results and publishes whatever is being ' +
+        'tested on it. Add a noindex, disallow it in robots.txt, or put it behind authentication.',
+      `https://${row.host}/`));
+  }
+
+  // --- The same site again, on another host -------------------------------
+  //
+  // Compared body to body rather than by title, for the same reason
+  // `duplicate-content` is: two hosts serving one site is a real split of the
+  // signals, and two hosts that happen to share a title is a coincidence.
+  // Silent when the sibling has already been reported as staging — one fault
+  // gets one finding.
+  const home = await fetcher.get(`${origin}/`);
+  const homeDoc = home.ok && /text\/html/i.test(home.headers.get('content-type') ?? '')
+    ? parseHtml(home.body, `${origin}/`)
+    : null;
+  if (homeDoc?.fingerprint) {
+    for (const row of probed) {
+      if (staged.has(row.host) || row.noindex || !row.servesOwnRoot) continue;
+      if (row.status !== 200 || !row.fingerprint) continue;
+      let canonicalHost = null;
+      try {
+        canonicalHost = row.canonical ? new URL(row.canonical, `https://${row.host}/`).hostname : null;
+      } catch { /* as above */ }
+      if (canonicalHost && mine.has(canonicalHost)) continue;
+      if (similarity(homeDoc.fingerprint, row.fingerprint) < 0.9) continue;
+
+      out.push(f('warn', 'duplicate-host', `${row.host} serves the same site again`,
+        `Its home page is the same page as ${origin}/, it is indexable, and its canonical does not point ` +
+          'back. Two hosts serving one site split every signal the site earns between them, and Google ' +
+          'picks which one to show. Redirect it to the canonical host, or make it say so with a canonical.',
+        `https://${row.host}/`));
+    }
+  }
+
+  // --- The inventory ------------------------------------------------------
+  // Shipped whether or not anything was wrong, because "what else is on this
+  // domain" is a question worth an answer on a healthy domain too.
+  const [ns, mx, txt] = await Promise.all([
+    lookup(apex, 'NS', dnsOpts), lookup(apex, 'MX', dnsOpts), lookup(apex, 'TXT', dnsOpts),
+  ]);
+  const byHost = new Map(probed.map((p) => [p.host, p]));
+
+  return {
+    findings: out,
+    hosts: {
+      apex,
+      // Which log answered. Two runs of one domain can list different hosts
+      // because different sources answered them, and a reader comparing those
+      // two runs is owed the reason rather than left to suspect the domain
+      // changed.
+      source: log.source,
+      found: ranked.length,
+      resolved: resolved.filter((r) => r.live).length,
+      capped: Math.max(0, ranked.length - targets.length),
+      nameservers: ns.records,
+      // An MX record's data is a preference and a host — "10 mx.example.net" —
+      // and the number is a mail-routing detail nobody reads an SEO report for.
+      mail: mx.records.map((r) => r.replace(/^\d+\s+/, '')),
+      // Only the TXT records that say something about who the domain talks to.
+      // The rest are verification strings for a dozen SaaS products and are
+      // nobody's business in an SEO report.
+      // TXT records arrive quoted, and a long one arrives as several quoted
+      // chunks that are one string joined — which is the wire format, not
+      // something to print at somebody.
+      policies: txt.records
+        .map((r) => r.replace(/"\s*"/g, '').replace(/^"|"$/g, ''))
+        .filter((r) => /^v=(spf1|DMARC1)/i.test(r)),
+      rows: resolved.map((row) => {
+        const seen = byHost.get(row.host);
+        return {
+          host: row.host,
+          addresses: row.addresses,
+          cname: row.cname,
+          dangling: row.dangling,
+          status: seen?.status ?? null,
+          title: seen?.title ?? null,
+          landedPath: seen?.landedPath ?? null,
+          landed: seen?.landed ?? null,
+          redirectsHome: seen?.redirectsHome ?? false,
+          noindex: seen?.noindex ?? false,
+          // Said explicitly rather than inferred from a null status, which
+          // would read as "did not answer" for a host nobody asked.
+          checked: Boolean(seen),
+        };
+      }),
+    },
+  };
+}

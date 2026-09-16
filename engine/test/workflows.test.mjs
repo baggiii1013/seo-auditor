@@ -1,0 +1,101 @@
+// The release workflows, checked for the two mistakes that have each been made
+// twice now.
+//
+// Neither has a symptom until a tag is already pushed and something has half
+// published, and neither is visible in a diff — one is an absent line, the
+// other is a glob that looks correct. There is no YAML parser here (the tool
+// has no dependencies and this suite runs on a bare machine), so these read the
+// text. That is enough: both are about a line being present and well-formed.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+
+const dir = new URL('../.github/workflows/', import.meta.url);
+const workflows = readdirSync(dir)
+  .filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+  .map((name) => ({ name, text: readFileSync(new URL(name, dir), 'utf8') }));
+
+test('there are workflows to check', () => {
+  assert.ok(workflows.length >= 3, `only found ${workflows.length} workflow files`);
+});
+
+test('a warning that points somewhere points somewhere real', () => {
+  // The winget job tells whoever reads its warning to go and read a named
+  // section of a named file. A pointer to a heading that does not exist is
+  // worse than no pointer: it reads as an answer and ends the search.
+  const desktop = workflows.find((w) => w.name === 'desktop.yml');
+  assert.ok(desktop, 'desktop.yml should be there');
+
+  for (const [, quoted, file] of desktop.text.matchAll(
+    /see '([^']+)' in ([\w./-]+\.md)/g
+  )) {
+    const doc = readFileSync(new URL(`../${file}`, import.meta.url), 'utf8');
+    assert.match(doc, new RegExp(`^#+ ${quoted}\\s*$`, 'm'),
+      `${file} has no "${quoted}" heading, and a workflow warning sends people to it`);
+  }
+});
+
+test('a tag trigger names version tags, never a bare v*', () => {
+  // `v1` floats forward with every backwards-compatible release, so `v*` matches
+  // it. Force-pushing v1 then starts a second, full build of a release that does
+  // not exist — fifteen minutes to fail, on every compatible release forever.
+  // mac-release.yml and npm-publish.yml both carry a comment about this. The
+  // desktop workflow was written with `v*` anyway.
+  const wrong = [];
+  for (const { name, text } of workflows) {
+    for (const [, list] of text.matchAll(/^\s*tags:\s*(\[[^\]]*\]|.*)$/gm)) {
+      if (/v\*/.test(list)) wrong.push(`${name}: tags: ${list.trim()}`);
+    }
+  }
+  assert.deepEqual(wrong, [],
+    'a bare v* matches the floating v1 tag: ' + wrong.join(', ') +
+    ". Use 'v[0-9]+.[0-9]+.[0-9]+', the shape the other release workflows use.");
+});
+
+test('a job that runs gh without a checkout says which repo it means', () => {
+  // gh works out the repository from the git remote. A job with no
+  // actions/checkout has no remote, so it fails with "failed to run git: fatal:
+  // not a git repository" — which names the wrong problem entirely and sends
+  // you looking for a missing checkout you never wanted. GH_REPO tells it
+  // directly, and is what a job that needs release assets rather than source
+  // should use.
+  //
+  // Jobs are found by indentation: two spaces under `jobs:`. Crude, but this
+  // suite has no YAML parser and cannot grow one.
+  const missing = [];
+  for (const { name, text } of workflows) {
+    const jobsAt = text.indexOf('\njobs:');
+    if (jobsAt < 0) continue;
+    const body = text.slice(jobsAt);
+    const starts = [...body.matchAll(/^ {2}([A-Za-z0-9_-]+):$/gm)];
+    for (let i = 0; i < starts.length; i++) {
+      const from = starts[i].index;
+      const to = i + 1 < starts.length ? starts[i + 1].index : body.length;
+      const job = body.slice(from, to);
+      if (!/\bgh (release|api|run|pr) /.test(job)) continue;
+      if (/uses:\s*actions\/checkout/.test(job)) continue;
+      if (/GH_REPO:/.test(job)) continue;
+      missing.push(`${name}: job "${starts[i][1]}"`);
+    }
+  }
+  assert.deepEqual(missing, [],
+    `${missing.join(', ')} runs gh with neither a checkout nor GH_REPO. ` +
+    'gh will fail with "fatal: not a git repository", which is not what is wrong.');
+});
+
+test('a workflow that writes to a release asks for permission to', () => {
+  // Without `contents: write` the token is read-only and `gh release upload`
+  // fails with "HTTP 403: Resource not accessible by integration" — after the
+  // bundles have been built, installed and run, twenty minutes in, on a release
+  // that is already public and now incomplete.
+  const missing = [];
+  for (const { name, text } of workflows) {
+    const writes = /gh release (upload|create|edit|delete)/.test(text);
+    if (!writes) continue;
+    if (!/^\s*contents:\s*write\s*$/m.test(text)) missing.push(name);
+  }
+  assert.deepEqual(missing, [],
+    `${missing.join(', ')} writes to a release but never asks for contents: write. ` +
+    'The token is read-only by default, so the upload fails with a 403 after the ' +
+    'build has already succeeded.');
+});
