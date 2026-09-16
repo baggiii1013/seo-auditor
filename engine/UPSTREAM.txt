@@ -21,6 +21,13 @@ worker/index.mjs, /stream — two `.catch(() => {})` guards, both marked PATCHED
 
   Worth sending upstream — it is a bug in `--serve` too, not just here.
 
+src/console.mjs:484 — two `/*turbopackIgnore: true*/` comments.
+
+  `dotfile` is ~/.config/seo-audit/.env, outside the project by design, so
+  Turbopack's static analysis gives up and traces the entire repository into
+  the server bundle. Ours only, not upstream's problem: a bundler comment in a
+  file the CLI runs unbundled.
+
 KNOWN UPSTREAM PACKAGING BUG (not patched, does not affect us)
 --------------------------------------------------------------
 `files` in package.json omits `worker/`, so `npm i -g @nurkamol/seo-audit`

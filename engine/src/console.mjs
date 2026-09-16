@@ -481,7 +481,12 @@ export async function login({
   const granted = await exchangeCode({ clientId, clientSecret, code, redirectUri }, fetcher);
 
   mkdirSync(dirname(dotfile), { recursive: true });
-  const existing = existsSync(dotfile) ? readFileSync(dotfile, 'utf8') : '';
+  // turbopackIgnore: `dotfile` is ~/.config/seo-audit/.env, which cannot be
+  // statically scoped to a folder inside the project. Without these, Turbopack
+  // traces the whole repo into the server bundle.
+  const existing = existsSync(/*turbopackIgnore: true*/ dotfile)
+    ? readFileSync(/*turbopackIgnore: true*/ dotfile, 'utf8')
+    : '';
   // 0600, and never printed: a refresh token echoed to a terminal is a refresh
   // token in a scrollback buffer and probably in a shell history file.
   writeFileSync(dotfile, upsertSecret(existing, 'GSC_REFRESH_TOKEN', granted.refresh_token), { mode: 0o600 });

@@ -74,8 +74,8 @@ export type Report = {
 };
 
 export const LEVELS: Record<Level, { label: string; dot: string; text: string; ring: string }> = {
-  error: { label: 'Error', dot: 'bg-rose-500', text: 'text-rose-300', ring: 'ring-rose-500/30' },
-  warn: { label: 'Warning', dot: 'bg-amber-400', text: 'text-amber-300', ring: 'ring-amber-400/30' },
-  note: { label: 'Note', dot: 'bg-sky-400', text: 'text-sky-300', ring: 'ring-sky-400/30' },
-  info: { label: 'Note', dot: 'bg-sky-400', text: 'text-sky-300', ring: 'ring-sky-400/30' },
+  error: { label: 'Error', dot: 'bg-rose-500', text: 'text-rose-600', ring: 'ring-rose-500/20' },
+  warn: { label: 'Warning', dot: 'bg-amber-500', text: 'text-amber-700', ring: 'ring-amber-500/20' },
+  note: { label: 'Note', dot: 'bg-sky-500', text: 'text-sky-700', ring: 'ring-sky-500/20' },
+  info: { label: 'Note', dot: 'bg-sky-500', text: 'text-sky-700', ring: 'ring-sky-500/20' },
 };

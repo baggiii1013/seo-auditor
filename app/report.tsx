@@ -5,12 +5,15 @@ import { useMemo, useState } from 'react';
 import { LEVELS, type Cause, type CheckRow, type Level, type Report } from './types';
 
 const GRADE_COLOR: Record<string, string> = {
-  A: '#34d399',
-  B: '#a3e635',
-  C: '#fbbf24',
-  D: '#fb923c',
-  F: '#fb7185',
+  A: '#16a34a',
+  B: '#65a30d',
+  C: '#d97706',
+  D: '#ea580c',
+  F: '#e11d48',
 };
+
+const ghost =
+  'rounded-lg border border-line bg-white px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
 
 const download = (name: string, body: BlobPart, type: string) => {
   const url = URL.createObjectURL(new Blob([body], { type }));
@@ -35,13 +38,21 @@ async function render(report: Report, as: 'html' | 'markdown' | 'csv') {
 }
 
 function Ring({ score, grade }: { score: number; grade: string }) {
-  const color = GRADE_COLOR[grade] ?? '#a3e635';
+  const color = GRADE_COLOR[grade] ?? '#65a30d';
   const r = 54;
   const circumference = 2 * Math.PI * r;
   return (
     <div className="relative grid size-36 shrink-0 place-items-center">
       <svg viewBox="0 0 128 128" className="size-36 -rotate-90">
-        <circle cx="64" cy="64" r={r} fill="none" stroke="currentColor" strokeWidth="9" className="text-white/8" />
+        <circle
+          cx="64"
+          cy="64"
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="9"
+          className="text-ink/8"
+        />
         <circle
           cx="64"
           cy="64"
@@ -56,8 +67,8 @@ function Ring({ score, grade }: { score: number; grade: string }) {
         />
       </svg>
       <div className="absolute text-center">
-        <div className="text-4xl font-semibold tabular-nums tracking-tight">{score}</div>
-        <div className="text-xs font-medium tracking-[0.18em] text-white/40">{grade}</div>
+        <div className="t-num text-[2.75rem] leading-none font-semibold">{score}</div>
+        <div className="t-eyebrow mt-1.5 text-ink/45">{grade}</div>
       </div>
     </div>
   );
@@ -65,9 +76,9 @@ function Ring({ score, grade }: { score: number; grade: string }) {
 
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
-    <div className="rounded-xl border border-white/8 bg-white/[0.02] px-4 py-3">
-      <div className="text-lg font-semibold tabular-nums">{value}</div>
-      <div className="mt-0.5 text-[11px] tracking-wide text-white/40">{label}</div>
+    <div className="rounded-xl border border-line bg-canvas px-4 py-3">
+      <div className="t-num text-xl font-semibold">{value}</div>
+      <div className="t-eyebrow mt-1 text-ink/45">{label}</div>
     </div>
   );
 }
@@ -75,21 +86,21 @@ function Stat({ label, value }: { label: string; value: string | number }) {
 function Areas({ areas }: { areas: NonNullable<Report['score']['areas']> }) {
   const worst = Math.max(...areas.map((a) => a.lost), 1);
   return (
-    <div className="space-y-2">
+    <div className="space-y-2.5">
       {areas.map((area) => (
         <div key={area.name} className="grid grid-cols-[9rem_1fr_auto] items-center gap-3 text-sm">
-          <div className="truncate text-white/70">{area.name}</div>
-          <div className="h-2 overflow-hidden rounded-full bg-white/6">
+          <div className="truncate font-medium text-ink/80">{area.name}</div>
+          <div className="h-2 overflow-hidden rounded-full bg-ink/8">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-amber-400 to-rose-500 transition-[width] duration-700"
+              className="h-full rounded-full bg-gradient-to-r from-amber-400 to-rose-500 transition-[width] duration-700 ease-out"
               style={{ width: `${area.lost ? Math.max(3, (area.lost / worst) * 100) : 0}%` }}
             />
           </div>
-          <div className="tabular-nums text-white/40">
-            <span className={area.lost ? 'text-rose-300' : 'text-emerald-300'}>
+          <div className="t-num text-ink/50">
+            <span className={area.lost ? 'text-rose-600' : 'text-emerald-600'}>
               {area.lost ? `−${area.lost}` : '0'}
             </span>
-            <span className="ml-2 text-white/25">
+            <span className="ml-2 text-ink/35">
               {area.passed}/{area.passed + area.failed}
             </span>
           </div>
@@ -104,17 +115,17 @@ function CauseCard({ cause }: { cause: Cause }) {
   const level = LEVELS[cause.level] ?? LEVELS.note;
   const shown = open ? cause.pages : cause.pages.slice(0, 3);
   return (
-    <div className={`rounded-xl border border-white/8 bg-white/[0.02] p-4 ring-1 ring-inset ${level.ring}`}>
+    <div className={`card p-4 ring-1 ring-inset ${level.ring}`}>
       <div className="flex items-start gap-3">
         <span className={`mt-1.5 size-2 shrink-0 rounded-full ${level.dot}`} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <h4 className="font-medium">{cause.title}</h4>
-            <code className="rounded bg-white/6 px-1.5 py-0.5 font-mono text-[10px] text-white/40">
+            <h4 className="font-semibold tracking-[-0.011em]">{cause.title}</h4>
+            <code className="rounded bg-ink/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink/45">
               {cause.id}
             </code>
           </div>
-          <p className="mt-1 text-sm text-white/50">{cause.scope}</p>
+          <p className="mt-1 text-sm text-ink/60">{cause.scope}</p>
           {shown.length > 0 && (
             <ul className="mt-3 space-y-1">
               {shown.map((page) => (
@@ -123,7 +134,7 @@ function CauseCard({ cause }: { cause: Cause }) {
                     href={page}
                     target="_blank"
                     rel="noreferrer"
-                    className="text-white/45 underline decoration-white/15 underline-offset-2 hover:text-white/80"
+                    className="text-ink/55 underline decoration-ink/20 underline-offset-2 transition-colors duration-150 ease-out hover:text-brand"
                   >
                     {page}
                   </a>
@@ -134,7 +145,7 @@ function CauseCard({ cause }: { cause: Cause }) {
           {cause.pages.length > 3 && (
             <button
               onClick={() => setOpen((v) => !v)}
-              className="mt-2 text-xs text-white/40 underline underline-offset-2 hover:text-white/70"
+              className="mt-2 text-xs font-medium text-ink/50 underline underline-offset-2 transition-colors duration-150 ease-out hover:text-ink"
             >
               {open ? 'Show fewer' : `Show all ${cause.pages.length}`}
             </button>
@@ -157,17 +168,21 @@ function Collapsible({
   const [open, setOpen] = useState(false);
   if (!count) return null;
   return (
-    <section className="rounded-2xl border border-white/8 bg-white/[0.02]">
+    <section className="card overflow-hidden">
       <button
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left"
+        className="flex w-full items-center justify-between px-5 py-4 text-left transition-colors duration-150 ease-out hover:bg-ink/[0.02]"
       >
-        <span className="font-medium">
-          {title} <span className="ml-1 text-white/35 tabular-nums">{count}</span>
+        <span className="font-semibold tracking-[-0.011em]">
+          {title} <span className="t-num ml-1 font-normal text-ink/45">{count}</span>
         </span>
-        <span className={`text-white/30 transition-transform ${open ? 'rotate-90' : ''}`}>›</span>
+        <span
+          className={`text-ink/35 transition-transform duration-200 ease-out ${open ? 'rotate-90' : ''}`}
+        >
+          ›
+        </span>
       </button>
-      {open && <div className="border-t border-white/8 px-5 py-4">{children}</div>}
+      {open && <div className="border-t border-line px-5 py-4">{children}</div>}
     </section>
   );
 }
@@ -231,24 +246,21 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
     <div className="space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{host}</h2>
-          <p className="mt-1 text-sm text-white/40">
+          <h2 className="t-title">{host}</h2>
+          <p className="t-num mt-1.5 text-sm text-ink/55">
             {meta.pages} pages · {meta.requests} requests · {(meta.ms / 1000).toFixed(1)}s ·{' '}
             {meta.date}
             {meta.ignored ? ` · ${meta.ignored} silenced` : ''}
           </p>
         </div>
-        <button
-          onClick={onReset}
-          className="rounded-lg border border-white/12 px-4 py-2 text-sm text-white/70 transition hover:border-white/25 hover:text-white"
-        >
+        <button onClick={onReset} className={ghost}>
           New audit
         </button>
       </header>
 
-      <section className="flex flex-wrap items-center gap-8 rounded-2xl border border-white/8 bg-white/[0.02] p-6">
+      <section className="card flex flex-wrap items-center gap-8 p-6">
         {score.score === null ? (
-          <p className="text-white/60">{score.why ?? 'There was nothing to score.'}</p>
+          <p className="text-ink/70">{score.why ?? 'There was nothing to score.'}</p>
         ) : (
           <>
             <Ring score={score.score} grade={score.grade ?? '—'} />
@@ -263,10 +275,8 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
       </section>
 
       {score.areas && score.areas.length > 0 && (
-        <section className="rounded-2xl border border-white/8 bg-white/[0.02] p-6">
-          <h3 className="mb-4 text-xs font-medium tracking-[0.18em] text-white/35">
-            POINTS LOST BY AREA
-          </h3>
+        <section className="card p-6">
+          <h3 className="t-eyebrow mb-4 text-ink/45">Points lost by area</h3>
           <Areas areas={score.areas} />
         </section>
       )}
@@ -274,25 +284,23 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
       {byArea.length > 0 ? (
         byArea.map(([area, list]) => (
           <section key={area} className="space-y-3">
-            <h3 className="text-xs font-medium tracking-[0.18em] text-white/35">
-              {area.toUpperCase()}
-            </h3>
+            <h3 className="t-eyebrow text-ink/45">{area}</h3>
             {list.map((cause) => (
               <CauseCard key={cause.id} cause={cause} />
             ))}
           </section>
         ))
       ) : (
-        <section className="rounded-2xl border border-emerald-400/20 bg-emerald-400/5 p-6 text-emerald-200">
+        <section className="rounded-2xl border border-emerald-500/25 bg-emerald-50 p-6 text-emerald-800">
           Nothing to fix. Every check that applied to this run passed.
         </section>
       )}
 
       <Collapsible title="Passing" count={score.passed?.length ?? 0}>
-        <ul className="grid gap-x-6 gap-y-1.5 text-sm text-white/55 sm:grid-cols-2">
+        <ul className="grid gap-x-6 gap-y-1.5 text-sm text-ink/70 sm:grid-cols-2">
           {score.passed?.map((row: CheckRow) => (
             <li key={row.id} className="flex gap-2">
-              <span className="text-emerald-400">✓</span>
+              <span className="text-emerald-600">✓</span>
               <span>{row.pass}</span>
             </li>
           ))}
@@ -300,33 +308,31 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
       </Collapsible>
 
       <Collapsible title="Not checked" count={score.skipped?.length ?? 0}>
-        <p className="mb-3 text-sm text-white/40">
+        <p className="mb-3 text-sm text-ink/55">
           These did not apply to this run and are not counted either way — a check that could not
           run is not a check that passed.
         </p>
-        <ul className="space-y-1.5 text-sm text-white/55">
+        <ul className="space-y-1.5 text-sm text-ink/70">
           {score.skipped?.map((row: CheckRow) => (
             <li key={row.id} className="flex gap-2">
-              <span className="text-white/25">·</span>
+              <span className="text-ink/30">·</span>
               <span>
                 {row.pass}
-                {row.why && <span className="text-white/35"> — {row.why}</span>}
+                {row.why && <span className="text-ink/45"> — {row.why}</span>}
               </span>
             </li>
           ))}
         </ul>
       </Collapsible>
 
-      <section className="flex flex-wrap gap-2 rounded-2xl border border-white/8 bg-white/[0.02] p-5">
-        <span className="mr-2 self-center text-xs font-medium tracking-[0.18em] text-white/35">
-          EXPORT
-        </span>
+      <section className="card flex flex-wrap gap-2 p-5">
+        <span className="t-eyebrow mr-2 self-center text-ink/45">Export</span>
         {(['html', 'markdown', 'csv'] as const).map((as) => (
           <button
             key={as}
             onClick={() => save(as)}
             disabled={busy !== null}
-            className="rounded-lg border border-white/12 px-3 py-1.5 text-sm text-white/70 transition hover:border-white/25 hover:text-white disabled:opacity-40"
+            className={`${ghost} px-3 py-1.5`}
           >
             {busy === as ? 'Rendering…' : as === 'markdown' ? 'Markdown' : as.toUpperCase()}
           </button>
@@ -335,7 +341,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
           onClick={() =>
             download(`${host}-${meta.date}.json`, JSON.stringify(report, null, 2), 'application/json')
           }
-          className="rounded-lg border border-white/12 px-3 py-1.5 text-sm text-white/70 transition hover:border-white/25 hover:text-white"
+          className={`${ghost} px-3 py-1.5`}
         >
           JSON
         </button>
@@ -344,7 +350,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
             <button
               key={name}
               onClick={() => download(name, body, type)}
-              className="rounded-lg border border-emerald-400/25 px-3 py-1.5 text-sm text-emerald-200 transition hover:border-emerald-400/50"
+              className="rounded-lg border border-brand/35 bg-brand/[0.06] px-3 py-1.5 text-sm font-medium text-brand transition duration-150 ease-out hover:border-brand/60 active:scale-[0.98]"
             >
               {name}
             </button>
