@@ -310,6 +310,25 @@ export function parseHtml(rawHtml, pageUrl) {
     .map((m) => countWords(stripTags(m[1])))
     .filter((n) => n > 0);
 
+  // The three moves the Princeton GEO study (KDD 2024) measured a lift from:
+  // citing a source, carrying a number, quoting a named person. Counts only.
+  //
+  // None of these is scored, and that is the point rather than an omission. A
+  // reference page with no outbound citations is not broken; a page that quotes
+  // nobody is not broken. Absence here is something a writer could do next, and
+  // the engine has a level for that — a note is a fact, not an instruction.
+  //
+  // Citations are counted inside <main> on purpose: the footer's links to
+  // Twitter and a status page are on every page of every site and say nothing
+  // about whether this page sourced its claims.
+  const citations = new Set(hrefs(mainAnchors).filter((h) => !h.startsWith(origin))).size;
+  const quotes = (main.match(/<blockquote\b|<cite\b/gi) ?? []).length;
+  // A percentage, a year, or a number long enough to have been looked up.
+  // Deliberately not every digit: "3 steps" and a phone number are not data,
+  // and counting them would make the check fire on nothing.
+  const statistics = (bodyText.match(/\d[\d,.]*\s?%|\b(?:19|20)\d{2}\b|\b\d[\d,.]{2,}\b/g) ?? [])
+    .length;
+
   // Text the page is hiding from a reader while still serving it to a crawler,
   // carrying something shaped like an instruction to a model. Both halves are
   // required: hidden text on its own is a spacer or a skip link, and the words
@@ -331,6 +350,10 @@ export function parseHtml(rawHtml, pageUrl) {
     // llms.txt for a real site and reading it.
     title: decodeText((markup.match(/<title[^>]*>([\s\S]*?)<\/title>/i) ?? [null, null])[1]),
     description: metaBy('name', 'description'),
+    // Who wrote it. One half of the experience-and-expertise signal an answer
+    // engine weighs before quoting a page; the other half is an `author` in the
+    // structured data, which the checks read from `jsonld` rather than here.
+    author: metaBy('name', 'author'),
     robots: metaBy('name', 'robots'),
     // <meta http-equiv="refresh" content="0;url=…"> — a redirect that is not
     // one, and the only kind this tool can see in the markup.
@@ -406,6 +429,9 @@ export function parseHtml(rawHtml, pageUrl) {
       paragraphs: paragraphWords.length,
       longestParagraph: paragraphWords.length ? Math.max(...paragraphWords) : 0,
       injected,
+      citations,
+      quotes,
+      statistics,
       // The share of the page that is the page. Null when the page never
       // marked a content region: without <main> the two texts are the same
       // string and the ratio would be 1 on every page of every site.

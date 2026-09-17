@@ -106,6 +106,10 @@ const AI_CHECKS: Record<string, { label: string; blurb: string }> = {
     label: 'Access',
     blurb: 'robots.txt and llms.txt agree about which assistants may read the site',
   },
+  'aeo-nosnippet': {
+    label: 'Snippet',
+    blurb: 'No page forbids the snippet an answer engine would quote it from',
+  },
   'aeo-no-answer-block': {
     label: 'Quotable',
     blurb: 'Pages answer a question in a passage an assistant can lift whole',
@@ -125,7 +129,15 @@ const AI_CHECKS: Record<string, { label: string; blurb: string }> = {
  *  Reads the same three lists the rest of the report reads. A check absent from
  *  all three did not exist in this run and is simply not shown — inventing a row
  *  for it would be claiming a result the engine never produced. */
-function AiPanel({ score, jumpTo }: { score: Report['score']; jumpTo: boolean }) {
+function AiPanel({
+  score,
+  jumpTo,
+  opportunities,
+}: {
+  score: Report['score'];
+  jumpTo: boolean;
+  opportunities: Cause[];
+}) {
   const area = score.areas?.find((a) => a.name === AI_AREA);
   if (!area) return null;
 
@@ -201,7 +213,45 @@ function AiPanel({ score, jumpTo }: { score: Report['score']; jumpTo: boolean })
             </div>
           </li>
         ))}
+        {/* The grid draws its hairlines with a gap over a coloured background,
+            so an odd number of checks leaves the last cell showing that colour
+            as a block. Fills it, two columns up only — one column has no gap. */}
+        {rows.length % 2 === 1 && <li aria-hidden className="hidden bg-white sm:block" />}
       </ul>
+
+      {/* What the page could still do. Separated from the rows above on
+          purpose: those are checks with a verdict, these are not. None of them
+          costs the score anything and a page that does none of them is not a
+          page with a fault in it — so they are listed under a heading that says
+          so, rather than mixed in with results that did pass or fail. */}
+      {opportunities.length > 0 && (
+        <div className="border-t border-line bg-canvas px-6 py-4">
+          <h4 className="t-eyebrow text-ink/45">
+            Worth doing next{' '}
+            <span className="t-num ml-0.5 font-normal text-ink/35">{opportunities.length}</span>
+          </h4>
+          <p className="mt-1.5 text-xs text-ink/45">
+            Not faults, and none of it costs the score. Things this site does not do that tend to
+            get a page quoted.
+          </p>
+          <ul className="mt-3 space-y-2">
+            {opportunities.map((cause) => (
+              <li key={cause.id} className="flex items-start gap-2.5 text-sm">
+                <span aria-hidden className="mt-0.5 text-ink/25">
+                  +
+                </span>
+                <div className="min-w-0">
+                  <span className="font-medium text-ink/80">{cause.title}</span>
+                  <span className="text-ink/40">
+                    {' '}
+                    · {cause.pages.length === 1 ? '1 page' : `${cause.pages.length} pages`}
+                  </span>
+                </div>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Only offered when the area actually produced a section to land on —
           a clean area has no findings and the anchor would go nowhere. */}
@@ -474,7 +524,16 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
       {/* Above the area bars on purpose: it is the question people came with,
           and the bars answer "where is this site weak" rather than "can an
           assistant read it". */}
-      <AiPanel score={score} jumpTo={byArea.some(([area]) => area === AI_AREA)} />
+      <AiPanel
+        score={score}
+        jumpTo={byArea.some(([area]) => area === AI_AREA)}
+        // The notes from this area only. They render again in the area section
+        // below, which is deliberate: this is the summary, that is the detail
+        // with the pages attached.
+        opportunities={(byArea.find(([area]) => area === AI_AREA)?.[1] ?? []).filter(
+          (cause) => cause.level === 'info' || cause.level === 'note',
+        )}
+      />
 
       {score.areas && score.areas.length > 0 && (
         <section className="card p-6">

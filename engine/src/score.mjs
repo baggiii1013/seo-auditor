@@ -194,6 +194,7 @@ const CHECKLIST = {
   'aeo-no-answer-block': { worst: 'warn', scope: 'page', needs: 'substantial', pass: 'Pages answer questions in a form that can be quoted' },
   'aeo-boilerplate-heavy': { worst: 'warn', scope: 'page', needs: 'contentRegions', pass: 'Pages are mostly their own content' },
   'geo-prompt-injection': { worst: 'error', scope: 'page', pass: 'No hidden text addresses the model' },
+  'aeo-nosnippet': { worst: 'warn', scope: 'page', pass: 'No page forbids the snippet it would be quoted from' },
 
   // --- Site & security ------------------------------------------------------
   'favicon-broken': { worst: 'warn', scope: 'site', pass: 'The favicon loads' },

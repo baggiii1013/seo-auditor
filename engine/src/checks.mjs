@@ -313,6 +313,27 @@ export function pageChecks(page, limits = DEFAULT_LIMITS) {
           'included, so everything it links to loses that path in.', url));
   }
 
+  // The page is indexed and forbids being quoted from. Every answer engine
+  // that honours Google's directives honours these, so the page can rank and
+  // still be the one result an assistant has nothing to show for.
+  //
+  // A warning rather than an error, because paywalled publishers set this on
+  // purpose and are right to. What it is not is invisible: this is the one
+  // directive that removes a page from answers while leaving it in results,
+  // and a site that set it years ago for a reason nobody remembers should at
+  // least be told the bill it is paying.
+  const snippet = /(^|[\s,])nosnippet([\s,]|$)/i.test(robotsDirectives)
+    ? 'nosnippet'
+    : /max-snippet\s*:\s*0(?![\d])/i.test(robotsDirectives)
+      ? 'max-snippet:0'
+      : null;
+  if (snippet) {
+    out.push(f('warn', 'aeo-nosnippet', 'Page forbids the snippet it would be quoted from',
+      `"${robotsDirectives.trim()}" — ${snippet} tells every engine that honours it to show no text from ` +
+        'this page. It can still rank, and an assistant asked about it still has nothing it is allowed ' +
+        'to quote. Deliberate behind a paywall; expensive anywhere else.', url));
+  }
+
   // Two sources for the same instruction, disagreeing. Google resolves it by
   // taking the most restrictive, so the page ends up doing what neither author
   // intended — and whichever file you are reading tells you the wrong story.
@@ -739,6 +760,49 @@ export function pageChecks(page, limits = DEFAULT_LIMITS) {
       out.push(f('info', 'geo-chunk-wall', 'One passage runs to the length of a page',
         `Longest paragraph: ${ans.longestParagraph} words. Retrieval splits a page into passages and ` +
           'quotes one; a passage this size is quoted whole or not at all.', url));
+    }
+
+    // --- What a page could do next ----------------------------------------
+    // Four things the research says lift the odds of being cited, and which
+    // this page does none of. Every one of them is a note and none is scored,
+    // deliberately: a page with no statistics in it is not a page with a fault
+    // in it, and the moment an absence like this costs points the report is
+    // telling people to pad their writing to satisfy a checker.
+    //
+    // The lift figures are quoted, not measured here — they come from the
+    // Princeton GEO study (KDD 2024, 10k queries against Perplexity) and are
+    // attributed in the text so nobody reads them as this tool's own finding.
+    if (!ans.citations) {
+      out.push(f('info', 'geo-no-citations', 'Nothing on the page cites a source',
+        'No links out to anywhere else from inside the content. The largest single effect in the ' +
+          'Princeton GEO study (+30–115% visibility) was adding citations to authoritative sources — ' +
+          'an assistant weighing two pages prefers the one that shows its work.', url));
+    }
+
+    if (!ans.statistics) {
+      out.push(f('info', 'geo-no-statistics', 'No numbers in the content',
+        'No figure, percentage or year in the text. Concrete numbers were the second-largest effect ' +
+          'in the same study (+40%): they are the part of a page an assistant can quote as a fact ' +
+          'rather than paraphrase as an opinion.', url));
+    }
+
+    if (!ans.quotes) {
+      out.push(f('info', 'geo-no-quotes', 'Nothing on the page quotes anyone',
+        'No <blockquote> or <cite> in the content. An attributed quote — name, role, year — was worth ' +
+          '+30–40% in the same study, and is the cheapest expertise signal a page can carry.', url));
+    }
+
+    // Structured data is the second place an author can live, and the one a
+    // machine reads first. Checked as a whole document rather than a shape,
+    // because `author` is valid on Article, BlogPosting, Recipe and more, and
+    // enumerating them would be a list that goes stale.
+    const authored =
+      doc.author || doc.jsonld?.some((node) => /"author"\s*:/.test(JSON.stringify(node)));
+    if (!authored) {
+      out.push(f('info', 'aeo-no-author', 'Nobody is named as the author',
+        'No author meta tag and no author in the structured data. Experience and expertise are the ' +
+          'first two letters of E-E-A-T, and neither can be read off a page that names nobody. Fair ' +
+          'for a product or pricing page; costly on anything that makes a claim.', url));
     }
   }
 

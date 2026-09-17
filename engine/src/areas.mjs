@@ -126,6 +126,11 @@ const CATEGORY_OF = {
   'aeo-boilerplate-heavy': 'AI & answer engines',
   'geo-chunk-wall': 'AI & answer engines',
   'geo-prompt-injection': 'AI & answer engines',
+  'aeo-nosnippet': 'AI & answer engines',
+  'geo-no-citations': 'AI & answer engines',
+  'geo-no-statistics': 'AI & answer engines',
+  'geo-no-quotes': 'AI & answer engines',
+  'aeo-no-author': 'AI & answer engines',
 
   // Site & security
   'favicon-broken': 'Site & security', 'favicon-missing': 'Site & security',

@@ -34,6 +34,32 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   map, so a site they never applied to is reported as skipped rather than
   credited with passing them.
 
+- **`aeo-nosnippet`** (warning) — the page is indexed and forbids the snippet it
+  would be quoted from, via `nosnippet` or `max-snippet:0` in the robots meta tag
+  or the `X-Robots-Tag` header. This was the largest remaining hole: the one
+  directive that removes a page from answers while leaving it in results, and
+  nothing here read it. A warning rather than an error because a paywalled
+  publisher sets it deliberately and is right to.
+
+- **Four notes on what a page could do next.** The checks above say what is
+  wrong. A site whose pages are all fine was told nothing it could still do,
+  which is most of what the two reference tools are actually for. These are
+  quoted lifts from the Princeton GEO study (KDD 2024, 10,000 queries against
+  Perplexity), attributed in the finding text so they do not read as this tool's
+  own measurement:
+  - **`geo-no-citations`** — no links out to another domain from inside
+    `<main>`. The largest effect in the study, +30–115%. Counted inside the
+    content on purpose: a footer link to Twitter is on every page of every site.
+  - **`geo-no-statistics`** — no figure, percentage or year in the text (+40%).
+  - **`geo-no-quotes`** — no `<blockquote>` or `<cite>` (+30–40%).
+  - **`aeo-no-author`** — no author meta tag and no `author` in the structured
+    data, the two places experience and expertise can be read from.
+
+  None of the four is scored, and that is the design rather than an omission: a
+  page with no statistics in it does not have a fault in it, and an absence that
+  costs points is a report asking people to pad their writing to satisfy a
+  checker. They are silent under the thin threshold like the rest.
+
 - **The Raycast extension runs on Raycast for Windows.** Nothing in it needed
   native code, so this was three macOS assumptions rather than a port:
   - **Recent Reports read `~/Library/Application Support` on every platform.**

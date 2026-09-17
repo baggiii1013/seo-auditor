@@ -3171,6 +3171,72 @@ test('one passage the length of a page is a note, and an ordinary one says nothi
   assert.ok(!shell(Array.from({ length: 8 }, () => wordy(50)).join('')).includes('geo-chunk-wall'));
 });
 
+test('a page that forbids its own snippet is reported, in the meta tag or the header', () => {
+  const html = (robots) =>
+    `<html lang="en"><head><title>A page about widgets</title>${robots ? `<meta name="robots" content="${robots}">` : ''}</head><body><main><h1>W</h1>${wordy()}</main></body></html>`;
+
+  assert.ok(ids(pageChecks(page(html('index, nosnippet')))).includes('aeo-nosnippet'));
+  assert.ok(ids(pageChecks(page(html('max-snippet:0')))).includes('aeo-nosnippet'));
+
+  // The same instruction in the header, which the markup does not show.
+  assert.ok(
+    ids(pageChecks(page(html(null), 'https://x.test/p/', {
+      res: { ok: true, status: 200, ms: 10, headers: new Headers({ 'x-robots-tag': 'nosnippet' }) },
+    }))).includes('aeo-nosnippet'),
+  );
+
+  // A page with no directive, an ordinary one, and a snippet cap that is a cap
+  // rather than a refusal — none of which forbids anything.
+  assert.ok(!ids(pageChecks(page(html(null)))).includes('aeo-nosnippet'));
+  assert.ok(!ids(pageChecks(page(html('index, follow')))).includes('aeo-nosnippet'));
+  assert.ok(!ids(pageChecks(page(html('max-snippet:50')))).includes('aeo-nosnippet'));
+  // The substring trap: "max-snippet:0" is not the start of "max-snippet:0…"
+  assert.ok(!ids(pageChecks(page(html('max-snippet:100')))).includes('aeo-nosnippet'));
+});
+
+test('the four things a page could do next are notes, and a page that does them is quiet', () => {
+  const shell = (inner, head = '') =>
+    ids(pageChecks(page(`<html lang="en"><head><title>A page about widgets</title>${head}</head><body><main><h1>W</h1><h2>What is a widget?</h2>${inner}</main></body></html>`)));
+
+  // A page of prose that cites nobody, counts nothing, quotes nobody and is
+  // signed by nobody. `wordy` emits "word0 word1 …", which is deliberately not
+  // a number: a digit glued to a letter is not a statistic.
+  const bare = shell(wordy());
+  for (const id of ['geo-no-citations', 'geo-no-statistics', 'geo-no-quotes', 'aeo-no-author']) {
+    assert.ok(bare.includes(id), `expected ${id}`);
+  }
+
+  // Each one, answered on its own terms.
+  assert.ok(!shell(`<p><a href="https://other.test/study">A study</a></p>${wordy()}`).includes('geo-no-citations'));
+  assert.ok(!shell(`<p>Adoption reached 42% in 2024.</p>${wordy()}`).includes('geo-no-statistics'));
+  assert.ok(!shell(`<blockquote>It works.</blockquote>${wordy()}`).includes('geo-no-quotes'));
+  assert.ok(!shell(wordy(), '<meta name="author" content="A Person">').includes('aeo-no-author'));
+
+  // An author in the structured data counts too — it is the copy a machine
+  // reads first, and `author` is valid on more types than we could list.
+  const jsonld = '<script type="application/ld+json">{"@type":"Article","author":{"@type":"Person","name":"A Person"}}</script>';
+  assert.ok(!shell(`${wordy()}${jsonld}`).includes('aeo-no-author'));
+
+  // A link to the site's own pages is not a citation, and the footer's link to
+  // Twitter is not one either — only outward links inside the content count.
+  assert.ok(shell(`<p><a href="https://x.test/other">Ours</a></p>${wordy()}`).includes('geo-no-citations'));
+  assert.ok(
+    ids(pageChecks(page(`<html lang="en"><head><title>A page about widgets</title></head><body><main><h1>W</h1><h2>What is a widget?</h2>${wordy()}</main><footer><a href="https://twitter.test/us">Us</a></footer></body></html>`)))
+      .includes('geo-no-citations'),
+  );
+
+  // None of the four fires on a thin page: it has thin-content against it and
+  // nothing is gained by listing four more things it does not have.
+  const thin = ids(pageChecks(page('<html lang="en"><head><title>A page about widgets</title></head><body><main><h1>W</h1><p>Short.</p></main></body></html>')));
+  for (const id of ['geo-no-citations', 'geo-no-statistics', 'geo-no-quotes', 'aeo-no-author']) {
+    assert.ok(!thin.includes(id), `${id} should not fire on a thin page`);
+  }
+
+  // That none of them is scored is not asserted here: all four only ever fire
+  // as notes, and 'every scored check is weighted at the level it is actually
+  // emitted at' reads the source and enforces that for every id at once.
+});
+
 test('a page missing the basics reports each one', () => {
   const found = ids(pageChecks(page('<html><body><main><p>hi</p></main></body></html>')));
   assert.ok(found.includes('title-missing'));
