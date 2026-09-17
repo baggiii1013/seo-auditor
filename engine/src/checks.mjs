@@ -701,6 +701,59 @@ export function pageChecks(page, limits = DEFAULT_LIMITS) {
     out.push(f('warn', 'thin-content', 'Thin page',
       `${doc.words} words. Under ~${LIMITS.thinWords} rarely ranks for anything competitive.`, url));
   }
+  // --- Answer and generative engines --------------------------------------
+  // What an assistant gets when it reads this page. The same three refusals as
+  // everywhere else apply: nothing here estimates a citation, none of it fires
+  // on a page too thin to have had the chance, and anything a publisher could
+  // reasonably have meant is a note.
+  //
+  // A page under the thin threshold is left alone by all of these. It already
+  // has `thin-content` against it, and saying the same fault four more ways is
+  // how a report gets ignored.
+  const ans = doc.answerable;
+  if (ans && doc.words >= LIMITS.thinWords) {
+    // A passage an assistant can lift whole. Without one it has to summarise
+    // the page and attribute the summary to itself, which is the difference
+    // between being cited and being read.
+    const blocks = ans.questions + ans.summaries + ans.definitionTerms;
+    if (!blocks) {
+      out.push(f('warn', 'aeo-no-answer-block', 'Nothing on the page answers a question directly',
+        `${doc.words} words, and no question-shaped heading, <summary> or <dt> among them. An assistant ` +
+          'quotes a passage, not a page: give it a heading that asks what a reader would ask and answer ' +
+          'it in the paragraph underneath.', url));
+    }
+
+    // Boilerplate. Measured against the page's own <main>, so a site that
+    // marks its content region is the only kind this can speak about — which
+    // is why `contentRatio` is null rather than 1 when it does not.
+    if (ans.contentRatio !== null && ans.contentRatio < 0.35) {
+      out.push(f('warn', 'aeo-boilerplate-heavy', 'Most of the page is not the page',
+        `${Math.round(ans.contentRatio * 100)}% of the words are inside <main>; the rest is navigation, ` +
+          'footer and chrome. An assistant weighing what this page is about is reading mostly furniture.', url));
+    }
+
+    // One paragraph an assistant must take whole or leave. The threshold is
+    // deliberately high — 300 words is not a long paragraph, it is a page with
+    // no paragraph breaks in it at all.
+    if (ans.longestParagraph >= 300) {
+      out.push(f('info', 'geo-chunk-wall', 'One passage runs to the length of a page',
+        `Longest paragraph: ${ans.longestParagraph} words. Retrieval splits a page into passages and ` +
+          'quotes one; a passage this size is quoted whole or not at all.', url));
+    }
+  }
+
+  // Text the page hides from a reader and still serves to a crawler, carrying
+  // something shaped like an instruction to a model. Error, and the one check
+  // here that fires on any page regardless of length: whatever it is, it is
+  // not what the page claims to be, and an assistant reading it is being
+  // handled rather than informed.
+  if (ans?.injected) {
+    out.push(f('error', 'geo-prompt-injection', 'Hidden text addresses the model, not the reader',
+      `${plural(ans.injected, 'hidden passage')} carrying model instructions — in a hidden element or an ` +
+        'HTML comment. Assistants treat this as manipulation and the page as untrustworthy; if it arrived ' +
+        'with a plugin or a template, it is worth knowing it is being served.', url));
+  }
+
   // A nofollow on an internal link is a page telling Google not to walk its own
   // site. Sometimes deliberate — a login or a faceted filter nobody wants
   // crawled — so a note, not a complaint.

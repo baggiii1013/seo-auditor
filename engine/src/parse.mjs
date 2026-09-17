@@ -278,6 +278,50 @@ export function parseHtml(rawHtml, pageUrl) {
       .replace(/<style[\s\S]*?<\/style>/gi, ' '),
   );
 
+  // The whole document as text, for the one thing the content region cannot
+  // answer: how much of this page is the page. Boilerplate is by definition
+  // what lives outside <main>, so measuring it needs both.
+  const wholeText = stripTags(
+    markup.replace(/<script[\s\S]*?<\/script>/gi, ' ').replace(/<style[\s\S]*?<\/style>/gi, ' '),
+  );
+
+  // --- What an answer engine reads --------------------------------------
+  // An assistant quoting a page does not quote the page: it quotes a passage
+  // out of it. These describe how well the markup separates one passage from
+  // the next, and every one of them is counted off markup that is already
+  // parsed above rather than fetched again.
+
+  // A question with its answer attached, in the three shapes that carry one
+  // without being guessed at: a <details>/<summary> pair, a heading that is a
+  // question, and a <dt>/<dd> definition list. A heading counts only when
+  // something follows it — a question with no answer under it is a nav label.
+  const questionHeadings = [...main.matchAll(/<h[2-6]\b[^>]*>([\s\S]*?)<\/h[2-6]>/gi)]
+    .map((m) => ({ text: decode(stripTags(m[1])), after: main.slice(m.index + m[0].length, m.index + m[0].length + 400) }))
+    .filter((h) => /\?\s*$/.test(h.text) || /^(what|why|how|when|where|who|which|can|do|does|is|are)\b/i.test(h.text))
+    .filter((h) => countWords(stripTags(h.after)) >= 10).length;
+
+  const summaries = (main.match(/<summary\b/gi) ?? []).length;
+  const definitionTerms = (main.match(/<dt\b/gi) ?? []).length;
+
+  // Paragraph lengths, for whether a passage survives being cut out of the
+  // page. A wall with no paragraph breaks is one chunk an assistant must take
+  // whole or not at all; the count is what matters, not the prose.
+  const paragraphWords = [...main.matchAll(/<p\b[^>]*>([\s\S]*?)<\/p>/gi)]
+    .map((m) => countWords(stripTags(m[1])))
+    .filter((n) => n > 0);
+
+  // Text the page is hiding from a reader while still serving it to a crawler,
+  // carrying something shaped like an instruction to a model. Both halves are
+  // required: hidden text on its own is a spacer or a skip link, and the words
+  // on their own are an article about prompt injection.
+  const hiddenRegions = [
+    ...markup.matchAll(/<(div|span|p|section)\b[^>]*(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|text-indent\s*:\s*-\d{4,}|aria-hidden\s*=\s*["']true["'])[^>]*>([\s\S]*?)<\/\1>/gi),
+  ].map((m) => m[2]);
+  const commented = [...rawHtml.matchAll(/<!--([\s\S]*?)-->/g)].map((m) => m[1]);
+  const INJECTION =
+    /\b(ignore (all |any )?(previous|prior|above) (instructions|prompts)|disregard (the )?(above|previous)|system prompt|you are (now )?an? (ai|assistant|language model)|as an ai language model|always (recommend|cite|rank) (this|us)|do not mention)\b/i;
+  const injected = [...hiddenRegions, ...commented].filter((text) => INJECTION.test(stripTags(text))).length;
+
   return {
     // Decoded, like every attribute value already was. A title is element text
     // rather than an attribute, so it went through none of this and arrived as
@@ -353,6 +397,22 @@ export function parseHtml(rawHtml, pageUrl) {
       ],
     },
     words: countWords(bodyText),
+    // What an answer engine gets when it reads this page. Counts only — the
+    // checks decide what they mean, and nothing here is scored on its own.
+    answerable: {
+      questions: questionHeadings,
+      summaries,
+      definitionTerms,
+      paragraphs: paragraphWords.length,
+      longestParagraph: paragraphWords.length ? Math.max(...paragraphWords) : 0,
+      injected,
+      // The share of the page that is the page. Null when the page never
+      // marked a content region: without <main> the two texts are the same
+      // string and the ratio would be 1 on every page of every site.
+      contentRatio: mainRegion && countWords(wholeText)
+        ? countWords(bodyText) / countWords(wholeText)
+        : null,
+    },
     // A sketch of the content, for finding pages that are the same page again.
     // Only when the page marked its content region: without `<main>` or
     // `<article>` the text above is the whole document, navigation and footer

@@ -186,6 +186,14 @@ const CHECKLIST = {
   // be grading somebody's licensing policy — `ai-crawler-blocked` is a note and
   // stays one.
   'ai-crawler-conflict': { worst: 'warn', scope: 'site', needs: 'llmsTxt', pass: 'robots.txt and llms.txt agree about AI assistants' },
+  // What is on the page once an assistant is allowed to read it. All three
+  // need `substantial`: they are silent on a site whose pages are all under
+  // the thin threshold, because that site has `thin-content` against it
+  // already and four more findings saying the same thing is how a report
+  // stops being read.
+  'aeo-no-answer-block': { worst: 'warn', scope: 'page', needs: 'substantial', pass: 'Pages answer questions in a form that can be quoted' },
+  'aeo-boilerplate-heavy': { worst: 'warn', scope: 'page', needs: 'contentRegions', pass: 'Pages are mostly their own content' },
+  'geo-prompt-injection': { worst: 'error', scope: 'page', pass: 'No hidden text addresses the model' },
 
   // --- Site & security ------------------------------------------------------
   'favicon-broken': { worst: 'warn', scope: 'site', pass: 'The favicon loads' },
@@ -389,6 +397,8 @@ const WHY_SKIPPED = {
   tls: 'The certificate could not be read from this runtime.',
   multipage: 'Only one page was crawled.',
   llmsTxt: 'The site serves no llms.txt, so there is nothing for robots.txt to contradict.',
+  substantial: 'No page has enough content for an assistant to quote a passage out of.',
+  contentRegions: 'No page marks its content region, so the page cannot be told from the furniture.',
   fingerprints: 'No page marks its content region, so pages cannot be compared.',
   ogImage: 'No page declares an og:image.',
   twitterImage: 'No page declares a twitter:image of its own.',

@@ -3,7 +3,7 @@ import { Fetcher, mapLimit } from './http.mjs';
 import { bodyKind, parseHtml, parseSitemap } from './parse.mjs';
 import { parseRobots, robotsVerdict } from './robots.mjs';
 import { redirectChecks } from './redirects.mjs';
-import { pageChecks, crossPageChecks, sitemapChecks } from './checks.mjs';
+import { pageChecks, crossPageChecks, sitemapChecks, DEFAULT_LIMITS } from './checks.mjs';
 import { certificateExpiry, siteChecks, hostChecks } from './site.mjs';
 import { linkGraph } from './graph.mjs';
 import { compareAgents } from './compare.mjs';
@@ -662,6 +662,12 @@ export async function audit(target, opts = {}) {
     ogImage: some((d) => Boolean(d.og['og:image'])),
     twitterImage: some((d) => Boolean(d.twitter['twitter:image'])),
     fingerprints: some((d) => d.fingerprint !== null),
+    // The answer-engine checks only speak about a page with enough on it to
+    // quote, and only about a page that said which part of it is the page.
+    // A site failing neither test has not passed these checks; it was never
+    // asked, and the report says so rather than handing out the points.
+    substantial: some((d) => d.words >= (opts.limits?.thinWords ?? DEFAULT_LIMITS.thinWords)),
+    contentRegions: some((d) => d.answerable?.contentRatio !== null && d.answerable?.contentRatio !== undefined),
     multipage: pages.length > 1,
     https: origin.startsWith('https:'),
     // Certificates need a TLS socket. Node has one; the Workers runtime does

@@ -120,6 +120,12 @@ const CATEGORY_OF = {
   'llms-missing': 'AI & answer engines',
   'ai-crawler-blocked': 'AI & answer engines',
   'ai-crawler-conflict': 'AI & answer engines',
+  // What an assistant gets once it is allowed in. The three above are about
+  // access; these are about what is there to read when access is granted.
+  'aeo-no-answer-block': 'AI & answer engines',
+  'aeo-boilerplate-heavy': 'AI & answer engines',
+  'geo-chunk-wall': 'AI & answer engines',
+  'geo-prompt-injection': 'AI & answer engines',
 
   // Site & security
   'favicon-broken': 'Site & security', 'favicon-missing': 'Site & security',

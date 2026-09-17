@@ -6,6 +6,34 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **Four checks on what an assistant gets when it reads a page.** The AI area
+  already answered "is an answer engine allowed in" — robots.txt, `llms.txt`,
+  and the thirteen agents. It said nothing about what is there once it is. These
+  are ported heuristics, not a dependency: `@canonry/aeo-audit` and
+  `geo-optimizer-skill` both cover this ground, and both would have duplicated
+  the robots/`llms.txt`/JSON-LD checks this already has — a site missing an
+  `llms.txt` would have been told so three times and docked for it three times.
+  - **`aeo-no-answer-block`** (warning) — a page with words on it and no
+    question-shaped heading, `<summary>` or `<dt>` among them. An assistant
+    quotes a passage, not a page; without one it summarises and attributes the
+    summary to itself.
+  - **`aeo-boilerplate-heavy`** (warning) — under a third of the words are
+    inside `<main>`. Skipped, not passed, on a site that marks no content
+    region: without `<main>` the ratio is 1 everywhere and would be a free pass.
+  - **`geo-prompt-injection`** (error) — text hidden from a reader and still
+    served to a crawler, carrying something shaped like an instruction to a
+    model. Both halves are required, so an article about prompt injection does
+    not trip it, and neither does a hidden "Menu".
+  - **`geo-chunk-wall`** (note) — one paragraph 300 words long. Retrieval
+    quotes a passage; a passage that size is quoted whole or not at all. A note
+    because a reference page is allowed to be one.
+
+  All three scored checks are silent on a page under the thin threshold, which
+  carries `thin-content` already — the same fault said four ways is how a report
+  stops being read. `substantial` and `contentRegions` join the applicability
+  map, so a site they never applied to is reported as skipped rather than
+  credited with passing them.
+
 - **The Raycast extension runs on Raycast for Windows.** Nothing in it needed
   native code, so this was three macOS assumptions rather than a port:
   - **Recent Reports read `~/Library/Application Support` on every platform.**
