@@ -85,10 +85,143 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   );
 }
 
+// --- AI & answer engines ----------------------------------------------------
+// The one area that gets a panel of its own. Not because it is worth more than
+// the others — the engine prices every check the same way and this changes none
+// of that — but because it is the question people arrive with, and a reader who
+// wants "can an assistant read my site" should not have to find row six of a
+// bar chart to answer it.
+//
+// Everything below is derived from the payload already on the wire. No engine
+// change, no second arithmetic: the numbers here are `score.areas`, `passed`,
+// `failed` and `skipped` rearranged, and if they ever disagree with the area
+// bar underneath them, this is the one that is wrong.
+const AI_AREA = 'AI & answer engines';
+
+/** What each check in the area is actually about, in a few words a reader who
+ *  did not write the checklist can act on. Keyed by id rather than matched on
+ *  prose, so a reworded `pass` sentence upstream does not silently fall out. */
+const AI_CHECKS: Record<string, { label: string; blurb: string }> = {
+  'ai-crawler-conflict': {
+    label: 'Access',
+    blurb: 'robots.txt and llms.txt agree about which assistants may read the site',
+  },
+  'aeo-no-answer-block': {
+    label: 'Quotable',
+    blurb: 'Pages answer a question in a passage an assistant can lift whole',
+  },
+  'aeo-boilerplate-heavy': {
+    label: 'Signal',
+    blurb: 'The words on the page are the page, not navigation and footer',
+  },
+  'geo-prompt-injection': {
+    label: 'Trust',
+    blurb: 'No hidden text addresses the model instead of the reader',
+  },
+};
+
+/** Whether an assistant is allowed in, and what it finds once it is.
+ *
+ *  Reads the same three lists the rest of the report reads. A check absent from
+ *  all three did not exist in this run and is simply not shown — inventing a row
+ *  for it would be claiming a result the engine never produced. */
+function AiPanel({ score, jumpTo }: { score: Report['score']; jumpTo: boolean }) {
+  const area = score.areas?.find((a) => a.name === AI_AREA);
+  if (!area) return null;
+
+  const state = (id: string) =>
+    score.failed?.some((r) => r.id === id)
+      ? 'failed'
+      : score.passed?.some((r) => r.id === id)
+        ? 'passed'
+        : score.skipped?.some((r) => r.id === id)
+          ? 'skipped'
+          : null;
+
+  const rows = Object.entries(AI_CHECKS)
+    .map(([id, meta]) => ({ id, ...meta, state: state(id) }))
+    .filter((row) => row.state !== null);
+  if (!rows.length) return null;
+
+  const total = area.passed + area.failed;
+  const skipped = rows.filter((r) => r.state === 'skipped').length;
+  // Green is a claim, and it is only honest when the run was in a position to
+  // make it. A one-page site with three of the four checks skipped came out
+  // "1/1" in green — which reads as a clean bill of health for a run that
+  // barely looked. Same rule as the engine's own: a check that could not run
+  // is not a check that passed.
+  const clean = area.failed === 0 && skipped === 0;
+
+  return (
+    <section className="card overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-4 px-6 pt-5 pb-4">
+        <div>
+          <h3 className="t-eyebrow text-ink/45">Answer &amp; generative engines</h3>
+          <p className="mt-2 max-w-md text-sm text-ink/60">
+            What ChatGPT, Claude, Perplexity and Gemini get when they read this site — whether
+            they are let in, and whether there is anything quotable once they are.
+          </p>
+        </div>
+        <div className="flex items-baseline gap-2">
+          <span
+            className={`t-num text-3xl font-semibold ${clean ? 'text-emerald-600' : 'text-ink'}`}
+          >
+            {area.passed}
+            <span className="text-ink/30">/{total}</span>
+          </span>
+          <span className="t-eyebrow text-ink/40">
+            {skipped ? `checks · ${skipped} not run` : 'checks'}
+          </span>
+        </div>
+      </div>
+
+      <ul className="grid gap-px border-t border-line bg-line sm:grid-cols-2">
+        {rows.map((row) => (
+          <li key={row.id} className="flex items-start gap-3 bg-white px-6 py-4">
+            <span
+              aria-hidden
+              className={`mt-1 grid size-4 shrink-0 place-items-center rounded-full text-[10px] font-bold text-white ${
+                row.state === 'failed'
+                  ? 'bg-rose-500'
+                  : row.state === 'passed'
+                    ? 'bg-emerald-500'
+                    : 'bg-ink/20'
+              }`}
+            >
+              {row.state === 'failed' ? '!' : row.state === 'passed' ? '✓' : '·'}
+            </span>
+            <div className="min-w-0">
+              <div className="flex items-baseline gap-2">
+                <span className="text-sm font-semibold tracking-[-0.011em]">{row.label}</span>
+                {row.state === 'skipped' && (
+                  <span className="t-eyebrow text-ink/35">not checked</span>
+                )}
+              </div>
+              <p className="mt-0.5 text-sm text-ink/55">{row.blurb}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {/* Only offered when the area actually produced a section to land on —
+          a clean area has no findings and the anchor would go nowhere. */}
+      {jumpTo && area.failed > 0 && (
+        <div className="border-t border-line px-6 py-3">
+          <a
+            href={`#${slug(AI_AREA)}`}
+            className="text-sm font-medium text-brand underline underline-offset-2 transition-colors duration-150 ease-out hover:text-ink"
+          >
+            {area.failed === 1 ? 'See what to fix' : `See the ${area.failed} to fix`} →
+          </a>
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** Only the areas that actually produced a section can be linked. The score's
- *  area names and the causes' are not the same vocabulary — "AI & answer
- *  engines" is a cause area with no scored row — so the linkable set is passed
- *  in rather than guessed from `failed > 0`. */
+ *  area names and the causes' are not the same vocabulary, so the linkable set
+ *  is passed in rather than guessed from `failed > 0`. */
 function Areas({
   areas,
   linked,
@@ -337,6 +470,11 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
       </section>
 
       <Jump score={score.score} grade={score.grade ?? '—'} areas={byArea} />
+
+      {/* Above the area bars on purpose: it is the question people came with,
+          and the bars answer "where is this site weak" rather than "can an
+          assistant read it". */}
+      <AiPanel score={score} jumpTo={byArea.some(([area]) => area === AI_AREA)} />
 
       {score.areas && score.areas.length > 0 && (
         <section className="card p-6">

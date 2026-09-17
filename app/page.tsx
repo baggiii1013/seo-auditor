@@ -22,7 +22,9 @@ export default function Home() {
         </h1>
         <p className="t-lead mt-3 max-w-xl text-ink/60">
           Crawls a site&rsquo;s sitemap and checks every page — metadata, structured data, links,
-          images, redirects and site-wide config.
+          images, redirects and site-wide config. Then the same pass asks what an answer engine
+          gets: whether ChatGPT, Claude and Perplexity are let in, and whether there is anything
+          quotable once they are.
         </p>
       </header>
 
