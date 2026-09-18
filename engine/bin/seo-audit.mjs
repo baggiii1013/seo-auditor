@@ -89,13 +89,6 @@ const HELP = `
                        Off by default here and on by default in the window and
                        the Raycast extension — those are watched, this is a
                        build step, and it calls a third party either way
-    --no-open          with --serve, do not open a browser. It opens one when
-                       a person ran the command and never when something else
-                       did, so this is only for the person who wants neither
-    --serve [port]     open the same form the hosted version serves, on this
-                       machine (default 4321). No account, no bill, and none of
-                       the limits a Worker has — the crawl is only bounded by
-                       what this computer will do
     --browser <name>   crawl as a real browser or a search crawler:
                        ${BROWSER_NAMES.join(', ')}.
                        Googlebot is what Google is served; a browser is what a
@@ -176,7 +169,6 @@ function parseArgs(argv) {
     else if (arg === '--write-sitemap') opts.writeSitemap = value();
     else if (arg === '--write-llms') opts.writeLlms = value();
     else if (arg === '--write-schema') opts.writeSchema = value();
-    else if (arg === '--no-open') opts.noOpen = true;
     else if (arg === '--md') opts.md = value();
     else if (arg === '--html') opts.html = value();
     else if (arg === '--json') opts.json = value();
@@ -190,11 +182,6 @@ function parseArgs(argv) {
     else if (arg === '--check-external') opts.checkExternal = true;
     else if (arg === '--hosts') opts.hosts = true;
     else if (arg === '--user-agent') opts.userAgent = value();
-    else if (arg === '--serve') {
-      // The port is optional: --serve on its own, or --serve 8080.
-      const next = argv[i + 1];
-      opts.serve = next && /^\d+$/.test(next) ? Number(argv[++i]) : true;
-    }
     else if (arg === '--search-console-login') opts.searchConsoleLogin = true;
     else if (arg === '--search-console') {
       // Optionally the property name, since a domain property is not a URL.
@@ -318,8 +305,7 @@ const live = (origin) =>
 // the config may carry its own overrides, which land on top of the shared ones.
 let sites = resolveSites(cli.targets ?? [], file);
 
-// The runs kept on this machine. Also a different program: it reads the same
-// folder the window and `--serve` read, and crawls nothing.
+// The runs kept on this machine. Also a different program, it crawls nothing.
 if (opts.reports !== undefined) {
   const { library } = await import('../src/library.mjs');
   const { sinceWhen, keptSince } = await import('../src/kept.mjs');
@@ -354,61 +340,6 @@ if (opts.reports !== undefined) {
   }
   process.exit(0);
 }
-
-// The local UI, which is a different program from here on: no target, no
-// report file, and it runs until interrupted.
-// `!== undefined` rather than truthiness: --serve 0 asks the operating system
-// to pick a free port, which is what the macOS app does, and zero is falsy.
-// That bug shipped as "the app opens and the engine never starts".
-if (opts.serve !== undefined) {
-  const { serve } = await import('../src/serve.mjs');
-  const { url } = await serve({
-    port: opts.serve === true ? 4321 : opts.serve,
-    maxPages: opts.limit,
-    userAgent: opts.userAgent,
-  });
-  console.log(`\n  seo-audit is serving at ${url}\n  Nothing leaves this machine. Ctrl-C to stop.\n`);
-
-  // Started by something rather than by somebody: when stdin is a *pipe*, its
-  // closing is the parent going away, and a server that outlives the window
-  // that opened it holds the port against the next launch.
-  //
-  // A pipe specifically, not merely "not a terminal". `--serve < /dev/null` is
-  // also not a TTY, and reading it ends at once — which shut the server down
-  // the instant it started, in the CI job added to catch exactly this kind of
-  // thing. A parent that wants to be noticed hands over a pipe.
-  const { fstatSync } = await import('node:fs');
-  const stdinIsPipe = (() => {
-    try {
-      const stdin = fstatSync(0);
-      // A named pipe or a socket: Node hands a child a socketpair rather than a
-      // FIFO, so checking only for one of them makes this fire in a terminal
-      // and not fire where it matters. /dev/null is a character device, which
-      // is neither.
-      return stdin.isFIFO() || stdin.isSocket();
-    } catch {
-      return false;
-    }
-  })();
-  if (stdinIsPipe) {
-    process.stdin.resume();
-    process.stdin.on('end', () => process.exit(0));
-    process.stdin.on('close', () => process.exit(0));
-  }
-
-  // Opened for a person, never for a parent. The same distinction the pipe
-  // check above already makes: somebody who typed `--serve` wants the page,
-  // and the macOS window — which spawns this and draws its own report — would
-  // get a browser it never asked for on every launch.
-  //
-  // This is the whole of "the desktop UI for Linux and Windows": a command that
-  // opens a window. Failing to open one is not a reason to refuse to serve, so
-  // the URL is printed either way and nothing here throws.
-  if (!stdinIsPipe && !opts.noOpen) {
-    const { openUrl } = await import('../src/open-url.mjs');
-    if (!openUrl(url)) console.log('  Open that address yourself — this system has no launcher I know.\n');
-  }
-} else {
 
 // --- sign in, and stop ----------------------------------------------------
 // Before anything that needs a URL: this takes none. It is the one thing here
@@ -616,5 +547,3 @@ const failed =
   (opts.failOn === 'warn' && n.error + n.warn > 0) ||
   (opts.failOn === 'new' && (comparison?.added.length ?? 0) > 0);
 process.exit(failed ? 1 : 0);
-
-}
