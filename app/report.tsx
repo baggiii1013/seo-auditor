@@ -2,15 +2,18 @@
 
 import { useMemo, useState } from 'react';
 
+import AiPanel from './ai-panel';
 import { LEVELS, type Cause, type CheckRow, type Level, type Report } from './types';
-
-const GRADE_COLOR: Record<string, string> = {
-  A: '#16a34a',
-  B: '#65a30d',
-  C: '#d97706',
-  D: '#ea580c',
-  F: '#e11d48',
-};
+import {
+  bandOf,
+  gradeColor,
+  BarRow,
+  ChartFrame,
+  DataTable,
+  Legend,
+  StackedBar,
+  StateDot,
+} from './viz';
 
 const ghost =
   'rounded-lg border border-line bg-white px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
@@ -39,8 +42,12 @@ async function render(report: Report, as: 'html' | 'markdown' | 'csv') {
   return res.text();
 }
 
+// The one hero figure on the page. Its colour is the status scale, the same
+// four tokens every other mark here uses, rather than a private five-step ramp
+// — A and B sharing a green costs nothing, because the letter is printed in
+// the middle of the ring.
 function Ring({ score, grade }: { score: number; grade: string }) {
-  const color = GRADE_COLOR[grade] ?? '#65a30d';
+  const color = gradeColor(grade);
   const r = 54;
   const circumference = 2 * Math.PI * r;
   return (
@@ -69,207 +76,56 @@ function Ring({ score, grade }: { score: number; grade: string }) {
         />
       </svg>
       <div className="absolute text-center">
-        <div className="t-num text-[2.75rem] leading-none font-semibold">{score}</div>
-        <div className="t-eyebrow mt-1.5 text-ink/45">{grade}</div>
+        {/* Proportional figures on a standalone number: tabular-nums gives
+            every digit the width of a zero, which reads loose at this size. */}
+        <div className="text-[2.75rem] leading-none font-semibold">{score}</div>
+        <div className="t-eyebrow mt-1.5 text-ink/45">
+          {grade} · {bandOf(score)}
+        </div>
       </div>
     </div>
   );
 }
 
-function Stat({ label, value }: { label: string; value: string | number }) {
+/** A stat tile: label, value, and — when there is one — the sentence that says
+ *  what the number is of. The hint is the verbose half; a bare "7" under
+ *  "Warnings" is a number a reader has to go and interpret somewhere else. */
+function Stat({
+  label,
+  value,
+  hint,
+  color,
+}: {
+  label: string;
+  value: string | number;
+  hint?: string;
+  color?: string;
+}) {
   return (
     <div className="rounded-xl border border-line bg-canvas px-4 py-3">
-      <div className="t-num text-xl font-semibold">{value}</div>
+      <div className="flex items-baseline gap-2">
+        {color && <span aria-hidden className="size-2 rounded-full" style={{ background: color }} />}
+        <span className="text-xl font-semibold">{value}</span>
+      </div>
       <div className="t-eyebrow mt-1 text-ink/45">{label}</div>
+      {hint && <div className="mt-1.5 text-xs leading-snug text-ink/45">{hint}</div>}
     </div>
   );
 }
 
-// --- AI & answer engines ----------------------------------------------------
-// The one area that gets a panel of its own. Not because it is worth more than
-// the others — the engine prices every check the same way and this changes none
-// of that — but because it is the question people arrive with, and a reader who
-// wants "can an assistant read my site" should not have to find row six of a
-// bar chart to answer it.
-//
-// Everything below is derived from the payload already on the wire. No engine
-// change, no second arithmetic: the numbers here are `score.areas`, `passed`,
-// `failed` and `skipped` rearranged, and if they ever disagree with the area
-// bar underneath them, this is the one that is wrong.
-const AI_AREA = 'AI & answer engines';
-
-/** What each check in the area is actually about, in a few words a reader who
- *  did not write the checklist can act on. Keyed by id rather than matched on
- *  prose, so a reworded `pass` sentence upstream does not silently fall out. */
-const AI_CHECKS: Record<string, { label: string; blurb: string }> = {
-  'ai-crawler-conflict': {
-    label: 'Access',
-    blurb: 'robots.txt and llms.txt agree about which assistants may read the site',
-  },
-  'aeo-nosnippet': {
-    label: 'Snippet',
-    blurb: 'No page forbids the snippet an answer engine would quote it from',
-  },
-  'aeo-no-answer-block': {
-    label: 'Quotable',
-    blurb: 'Pages answer a question in a passage an assistant can lift whole',
-  },
-  'aeo-boilerplate-heavy': {
-    label: 'Signal',
-    blurb: 'The words on the page are the page, not navigation and footer',
-  },
-  'geo-prompt-injection': {
-    label: 'Trust',
-    blurb: 'No hidden text addresses the model instead of the reader',
-  },
-};
-
-/** Whether an assistant is allowed in, and what it finds once it is.
+/** Points lost by area.
  *
- *  Reads the same three lists the rest of the report reads. A check absent from
- *  all three did not exist in this run and is simply not shown — inventing a row
- *  for it would be claiming a result the engine never produced. */
-function AiPanel({
-  score,
-  jumpTo,
-  opportunities,
-}: {
-  score: Report['score'];
-  jumpTo: boolean;
-  opportunities: Cause[];
-}) {
-  const area = score.areas?.find((a) => a.name === AI_AREA);
-  if (!area) return null;
-
-  const state = (id: string) =>
-    score.failed?.some((r) => r.id === id)
-      ? 'failed'
-      : score.passed?.some((r) => r.id === id)
-        ? 'passed'
-        : score.skipped?.some((r) => r.id === id)
-          ? 'skipped'
-          : null;
-
-  const rows = Object.entries(AI_CHECKS)
-    .map(([id, meta]) => ({ id, ...meta, state: state(id) }))
-    .filter((row) => row.state !== null);
-  if (!rows.length) return null;
-
-  const total = area.passed + area.failed;
-  const skipped = rows.filter((r) => r.state === 'skipped').length;
-  // Green is a claim, and it is only honest when the run was in a position to
-  // make it. A one-page site with three of the four checks skipped came out
-  // "1/1" in green — which reads as a clean bill of health for a run that
-  // barely looked. Same rule as the engine's own: a check that could not run
-  // is not a check that passed.
-  const clean = area.failed === 0 && skipped === 0;
-
-  return (
-    <section className="card overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-4 px-6 pt-5 pb-4">
-        <div>
-          <h3 className="t-eyebrow text-ink/45">Answer &amp; generative engines</h3>
-          <p className="mt-2 max-w-md text-sm text-ink/60">
-            What ChatGPT, Claude, Perplexity and Gemini get when they read this site — whether
-            they are let in, and whether there is anything quotable once they are.
-          </p>
-        </div>
-        <div className="flex items-baseline gap-2">
-          <span
-            className={`t-num text-3xl font-semibold ${clean ? 'text-emerald-600' : 'text-ink'}`}
-          >
-            {area.passed}
-            <span className="text-ink/30">/{total}</span>
-          </span>
-          <span className="t-eyebrow text-ink/40">
-            {skipped ? `checks · ${skipped} not run` : 'checks'}
-          </span>
-        </div>
-      </div>
-
-      <ul className="grid gap-px border-t border-line bg-line sm:grid-cols-2">
-        {rows.map((row) => (
-          <li key={row.id} className="flex items-start gap-3 bg-white px-6 py-4">
-            <span
-              aria-hidden
-              className={`mt-1 grid size-4 shrink-0 place-items-center rounded-full text-[10px] font-bold text-white ${
-                row.state === 'failed'
-                  ? 'bg-rose-500'
-                  : row.state === 'passed'
-                    ? 'bg-emerald-500'
-                    : 'bg-ink/20'
-              }`}
-            >
-              {row.state === 'failed' ? '!' : row.state === 'passed' ? '✓' : '·'}
-            </span>
-            <div className="min-w-0">
-              <div className="flex items-baseline gap-2">
-                <span className="text-sm font-semibold tracking-[-0.011em]">{row.label}</span>
-                {row.state === 'skipped' && (
-                  <span className="t-eyebrow text-ink/35">not checked</span>
-                )}
-              </div>
-              <p className="mt-0.5 text-sm text-ink/55">{row.blurb}</p>
-            </div>
-          </li>
-        ))}
-        {/* The grid draws its hairlines with a gap over a coloured background,
-            so an odd number of checks leaves the last cell showing that colour
-            as a block. Fills it, two columns up only — one column has no gap. */}
-        {rows.length % 2 === 1 && <li aria-hidden className="hidden bg-white sm:block" />}
-      </ul>
-
-      {/* What the page could still do. Separated from the rows above on
-          purpose: those are checks with a verdict, these are not. None of them
-          costs the score anything and a page that does none of them is not a
-          page with a fault in it — so they are listed under a heading that says
-          so, rather than mixed in with results that did pass or fail. */}
-      {opportunities.length > 0 && (
-        <div className="border-t border-line bg-canvas px-6 py-4">
-          <h4 className="t-eyebrow text-ink/45">
-            Worth doing next{' '}
-            <span className="t-num ml-0.5 font-normal text-ink/35">{opportunities.length}</span>
-          </h4>
-          <p className="mt-1.5 text-xs text-ink/45">
-            Not faults, and none of it costs the score. Things this site does not do that tend to
-            get a page quoted.
-          </p>
-          <ul className="mt-3 space-y-2">
-            {opportunities.map((cause) => (
-              <li key={cause.id} className="flex items-start gap-2.5 text-sm">
-                <span aria-hidden className="mt-0.5 text-ink/25">
-                  +
-                </span>
-                <div className="min-w-0">
-                  <span className="font-medium text-ink/80">{cause.title}</span>
-                  <span className="text-ink/40">
-                    {' '}
-                    · {cause.pages.length === 1 ? '1 page' : `${cause.pages.length} pages`}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
-
-      {/* Only offered when the area actually produced a section to land on —
-          a clean area has no findings and the anchor would go nowhere. */}
-      {jumpTo && area.failed > 0 && (
-        <div className="border-t border-line px-6 py-3">
-          <a
-            href={`#${slug(AI_AREA)}`}
-            className="text-sm font-medium text-brand underline underline-offset-2 transition-colors duration-150 ease-out hover:text-ink"
-          >
-            {area.failed === 1 ? 'See what to fix' : `See the ${area.failed} to fix`} →
-          </a>
-        </div>
-      )}
-    </section>
-  );
-}
-
-/** Only the areas that actually produced a section can be linked. The score's
+ *  One hue for every bar, not a gradient per bar. The old version ran an
+ *  amber-to-rose gradient inside each mark, which encoded the value twice —
+ *  once as length, once as colour — and spent the only free channel restating
+ *  what the bar already showed. The areas are nominal: they have no order of
+ *  their own, so colour has no ordering to carry.
+ *
+ *  The hue is the status scale rather than a categorical slot, because the
+ *  series means something bad. Every bar is labelled with its own number, so
+ *  the colour is never the only thing saying how much.
+ *
+ *  Only the areas that actually produced a section can be linked. The score's
  *  area names and the causes' are not the same vocabulary, so the linkable set
  *  is passed in rather than guessed from `failed > 0`. */
 function Areas({
@@ -281,36 +137,165 @@ function Areas({
 }) {
   const worst = Math.max(...areas.map((a) => a.lost), 1);
   return (
-    <div className="space-y-2.5">
-      {areas.map((area) => {
-        const Row = linked.has(area.name) ? 'a' : 'div';
-        return (
-        <Row
+    <div className="space-y-1">
+      {areas.map((area) => (
+        <BarRow
           key={area.name}
-          {...(linked.has(area.name) ? { href: `#${slug(area.name)}` } : {})}
-          className={`grid grid-cols-[9rem_1fr_auto] items-center gap-3 rounded-lg text-sm ${
-            linked.has(area.name) ? 'transition-colors duration-150 ease-out hover:bg-ink/[0.04]' : ''
-          }`}
-        >
-          <div className="truncate font-medium text-ink/80">{area.name}</div>
-          <div className="h-2 overflow-hidden rounded-full bg-ink/8">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-amber-400 to-rose-500 transition-[width] duration-700 ease-out"
-              style={{ width: `${area.lost ? Math.max(3, (area.lost / worst) * 100) : 0}%` }}
-            />
-          </div>
-          <div className="t-num text-ink/50">
-            <span className={area.lost ? 'text-rose-600' : 'text-emerald-600'}>
-              {area.lost ? `−${area.lost}` : '0'}
-            </span>
-            <span className="ml-2 text-ink/35">
+          label={area.name}
+          value={area.lost}
+          max={worst}
+          display={area.lost ? `\u2212${area.lost}` : '0'}
+          fill={area.lost ? 'var(--color-viz-critical)' : 'var(--color-viz-none)'}
+          tooltip={`${area.name}: ${area.lost} points lost, ${area.passed} of ${area.passed + area.failed} checks passing`}
+          href={linked.has(area.name) ? `#${slug(area.name)}` : undefined}
+          trailing={`${area.passed}/${area.passed + area.failed}`}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** How the checks came out, area by area. The composition the bar chart above
+ *  cannot show: two areas can lose the same points with very different numbers
+ *  of checks behind them, and "3 of 4 failed" is a different situation from
+ *  "3 of 40". Status hues, each with a word in the legend. */
+function AreaComposition({ areas }: { areas: NonNullable<Report['score']['areas']> }) {
+  return (
+    <div className="space-y-3">
+      {areas.map((area) => (
+        <div key={area.name} className="grid grid-cols-[minmax(6rem,10rem)_1fr] items-center gap-3">
+          <span className="truncate text-sm font-medium text-ink/80">{area.name}</span>
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <StackedBar
+                title={`${area.name}: ${area.passed} passed, ${area.failed} failed`}
+                segments={[
+                  { value: area.passed, color: 'var(--color-viz-good)', label: 'Passed' },
+                  { value: area.failed, color: 'var(--color-viz-critical)', label: 'Failed' },
+                ]}
+              />
+            </div>
+            <span className="t-num shrink-0 text-xs tabular-nums text-ink/45">
               {area.passed}/{area.passed + area.failed}
             </span>
           </div>
-        </Row>
-        );
-      })}
+        </div>
+      ))}
     </div>
+  );
+}
+
+/** Every check the run touched, in one list.
+ *
+ *  This replaced two collapsibles — "Passing" and "Not checked" — that between
+ *  them showed two thirds of the checklist and no way to look anything up. The
+ *  failures were only ever visible as findings grouped by area, so the one
+ *  question a reader actually asks of a checklist ("what about X?") had no
+ *  answer anywhere in the report.
+ *
+ *  All three states in one table, filterable, with the area beside each row.
+ *  The state is a dot *and* a word, never a colour on its own. */
+function Inventory({ score }: { score: Report['score'] }) {
+  const [filter, setFilter] = useState<'all' | 'failed' | 'passed' | 'skipped'>('all');
+  const [query, setQuery] = useState('');
+
+  const rows = useMemo(() => {
+    const tag = (list: CheckRow[] | undefined, state: 'passed' | 'failed' | 'skipped') =>
+      (list ?? []).map((row) => ({ ...row, state }));
+    return [
+      ...tag(score.failed, 'failed'),
+      ...tag(score.passed, 'passed'),
+      ...tag(score.skipped, 'skipped'),
+    ];
+  }, [score.failed, score.passed, score.skipped]);
+
+  const shown = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return rows.filter(
+      (row) =>
+        (filter === 'all' || row.state === filter) &&
+        (!needle ||
+          row.id.toLowerCase().includes(needle) ||
+          row.pass.toLowerCase().includes(needle) ||
+          row.area.toLowerCase().includes(needle)),
+    );
+  }, [rows, filter, query]);
+
+  if (!rows.length) return null;
+
+  const counts = {
+    all: rows.length,
+    failed: rows.filter((r) => r.state === 'failed').length,
+    passed: rows.filter((r) => r.state === 'passed').length,
+    skipped: rows.filter((r) => r.state === 'skipped').length,
+  };
+
+  return (
+    <section className="card overflow-hidden">
+      <div className="px-6 pt-5 pb-4">
+        <h3 className="t-eyebrow text-ink/45">Every check</h3>
+        <p className="mt-2 max-w-2xl text-sm text-ink/55">
+          The whole checklist and how this run came out on each line of it. A check that could not
+          run is listed as not checked and counted in neither direction — a missing result reads
+          exactly like a passing one, which is the failure this tool exists to refuse.
+        </p>
+
+        {/* One filter row above the thing it scopes, not per-section controls. */}
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          {(['all', 'failed', 'passed', 'skipped'] as const).map((key) => (
+            <button
+              key={key}
+              onClick={() => setFilter(key)}
+              aria-pressed={filter === key}
+              className={`t-eyebrow rounded-full border px-3 py-1.5 transition-colors duration-150 ease-out ${
+                filter === key
+                  ? 'border-ink/25 bg-ink/[0.05] text-ink'
+                  : 'border-line text-ink/50 hover:border-ink/25 hover:text-ink'
+              }`}
+            >
+              {key === 'all' ? 'All' : key === 'skipped' ? 'Not checked' : key}
+              <span className="t-num ml-1.5 font-normal text-ink/40">{counts[key]}</span>
+            </button>
+          ))}
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Find a check…"
+            aria-label="Filter checks"
+            className="ml-auto min-w-40 rounded-full border border-line bg-white px-3.5 py-1.5 text-sm text-ink placeholder:text-ink/35 focus:border-ink/25 focus:outline-none"
+          />
+        </div>
+      </div>
+
+      {shown.length === 0 ? (
+        <p className="border-t border-line px-6 py-6 text-sm text-ink/50">
+          Nothing matches &ldquo;{query}&rdquo;.
+        </p>
+      ) : (
+        <ul className="border-t border-line">
+          {shown.map((row) => (
+            <li
+              key={`${row.state}-${row.id}`}
+              className="flex items-start gap-3 border-b border-line/60 px-6 py-3 last:border-0"
+            >
+              <span className="mt-0.5">
+                <StateDot state={row.state} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                  <span className="text-sm text-ink/80">{row.pass}</span>
+                  <code className="rounded bg-ink/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink/45">
+                    {row.id}
+                  </code>
+                </div>
+                {row.why && <p className="mt-1 text-xs text-ink/45">{row.why}</p>}
+              </div>
+              <span className="t-eyebrow shrink-0 pt-1 text-ink/35">{row.area}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -401,37 +386,6 @@ function CauseCard({ cause }: { cause: Cause }) {
   );
 }
 
-function Collapsible({
-  title,
-  count,
-  children,
-}: {
-  title: string;
-  count: number;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  if (!count) return null;
-  return (
-    <section className="card overflow-hidden">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-5 py-4 text-left transition-colors duration-150 ease-out hover:bg-ink/[0.02]"
-      >
-        <span className="font-semibold tracking-[-0.011em]">
-          {title} <span className="t-num ml-1 font-normal text-ink/45">{count}</span>
-        </span>
-        <span
-          className={`text-ink/35 transition-transform duration-200 ease-out ${open ? 'rotate-90' : ''}`}
-        >
-          ›
-        </span>
-      </button>
-      {open && <div className="enter-fade border-t border-line px-5 py-4">{children}</div>}
-    </section>
-  );
-}
-
 export default function ReportView({ report, onReset }: { report: Report; onReset: () => void }) {
   const { meta, causes, score } = report;
   const [busy, setBusy] = useState<string | null>(null);
@@ -490,12 +444,19 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
   return (
     <div className="enter-up space-y-6">
       <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
+        <div className="min-w-0">
           <h2 className="t-title">{host}</h2>
+          {/* The crawl, in the terms the numbers below are counted in. A
+              report that opens with a score and never says how many pages it
+              read is asking to be trusted about a sample it never named. */}
           <p className="t-num mt-1.5 text-sm text-ink/55">
-            {meta.pages} pages · {meta.requests} requests · {(meta.ms / 1000).toFixed(1)}s ·{' '}
-            {meta.date}
-            {meta.ignored ? ` · ${meta.ignored} silenced` : ''}
+            {meta.pages} {meta.pages === 1 ? 'page' : 'pages'} crawled · {meta.requests} requests ·{' '}
+            {(meta.ms / 1000).toFixed(1)}s · {meta.date}
+          </p>
+          <p className="mt-1 text-xs text-ink/45">
+            {meta.sitemap ? `Pages came from ${meta.sitemap}` : 'No sitemap was found — pages were reached by following links'}
+            {meta.notIndexable ? ` · ${meta.notIndexable} not indexable` : ''}
+            {meta.ignored ? ` · ${meta.ignored} findings silenced by config` : ''}
           </p>
         </div>
         <button onClick={onReset} className={ghost}>
@@ -509,11 +470,42 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
         ) : (
           <>
             <Ring score={score.score} grade={score.grade ?? '—'} />
-            <div className="grid flex-1 grid-cols-2 gap-3 sm:grid-cols-4">
-              <Stat label="Errors" value={counts.error ?? 0} />
-              <Stat label="Warnings" value={counts.warn ?? 0} />
-              <Stat label="Notes" value={counts.note ?? 0} />
-              <Stat label="If errors fixed" value={score.ifErrorsFixed ?? '—'} />
+            <div className="min-w-0 flex-1">
+              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+                <Stat
+                  label="Errors"
+                  value={counts.error ?? 0}
+                  color="var(--color-viz-critical)"
+                  hint="Wrong, and costing the most per check."
+                />
+                <Stat
+                  label="Warnings"
+                  value={counts.warn ?? 0}
+                  color="var(--color-viz-warning)"
+                  hint="Worth fixing, worth a third of an error."
+                />
+                <Stat
+                  label="Notes"
+                  value={counts.note ?? 0}
+                  color="var(--color-viz-info)"
+                  hint="Reported only. None of these cost a point."
+                />
+                <Stat
+                  label="If errors fixed"
+                  value={score.ifErrorsFixed ?? '—'}
+                  color="var(--color-viz-good)"
+                  hint="The same sum with every error clean."
+                />
+              </div>
+              {/* The arithmetic, offered rather than asked for. The score is a
+                  deduction sheet and a reader is entitled to see the sheet. */}
+              {score.checks && (
+                <p className="t-num mt-3 text-xs tabular-nums text-ink/45">
+                  {score.checks.passed} of {score.checks.passed + score.checks.failed} applicable
+                  checks passed · {score.lost ?? 0} points lost
+                  {score.checks.skipped ? ` · ${score.checks.skipped} did not apply to this run` : ''}
+                </p>
+              )}
             </div>
           </>
         )}
@@ -523,31 +515,67 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
 
       {/* Above the area bars on purpose: it is the question people came with,
           and the bars answer "where is this site weak" rather than "can an
-          assistant read it". */}
-      <AiPanel
-        score={score}
-        jumpTo={byArea.some(([area]) => area === AI_AREA)}
-        // The notes from this area only. They render again in the area section
-        // below, which is deliberate: this is the summary, that is the detail
-        // with the pages attached.
-        opportunities={(byArea.find(([area]) => area === AI_AREA)?.[1] ?? []).filter(
-          (cause) => cause.level === 'info' || cause.level === 'note',
-        )}
-      />
+          assistant read it". Absent when the run had nothing to score for
+          answer engines either, rather than drawn empty. */}
+      {score.ai && <AiPanel ai={score.ai} pages={meta.pages} />}
 
       {score.areas && score.areas.length > 0 && (
-        <section className="card p-6">
-          <h3 className="t-eyebrow mb-4 text-ink/45">Points lost by area</h3>
-          <Areas areas={score.areas} linked={new Set(byArea.map(([area]) => area))} />
-        </section>
+        <>
+          <ChartFrame
+            title="Points lost by area"
+            caption="Where the hundred went. Each bar is the points that area took off the score, not a score out of a hundred of its own — an area's share of the sheet is not a sheet."
+            table={
+              <DataTable
+                columns={['Area', 'Points lost', 'Passed', 'Failed']}
+                align={['left', 'right', 'right', 'right']}
+                rows={score.areas.map((a) => [a.name, a.lost, a.passed, a.passed + a.failed])}
+              />
+            }
+          >
+            <Areas areas={score.areas} linked={new Set(byArea.map(([area]) => area))} />
+          </ChartFrame>
+
+          <ChartFrame
+            title="Checks by area"
+            caption="How many checks sit behind each of those bars. Three failures out of four is a different situation from three out of forty, and the points alone cannot tell you which one you are looking at."
+            legend={
+              <Legend
+                items={[
+                  { color: 'var(--color-viz-good)', label: 'Passed' },
+                  { color: 'var(--color-viz-critical)', label: 'Failed' },
+                ]}
+              />
+            }
+            table={
+              <DataTable
+                columns={['Area', 'Passed', 'Failed', 'Pass rate']}
+                align={['left', 'right', 'right', 'right']}
+                rows={score.areas.map((a) => [
+                  a.name,
+                  a.passed,
+                  a.failed,
+                  `${Math.round((100 * a.passed) / Math.max(1, a.passed + a.failed))}%`,
+                ])}
+              />
+            }
+          >
+            <AreaComposition areas={score.areas} />
+          </ChartFrame>
+        </>
       )}
 
       {byArea.length > 0 ? (
         byArea.map(([area, list]) => (
           <section key={area} id={slug(area)} className="scroll-mt-20 space-y-3">
             <h3 className="t-eyebrow text-ink/45">{area}</h3>
-            {list.map((cause) => (
-              <CauseCard key={cause.id} cause={cause} />
+            {/* Keyed by id *and* scope, because the id is not unique. The
+                engine splits one check into several causes when it fires in
+                different parts of a site — `slow` on /learn/seo/ and `slow` on
+                /learn/pages-router/ are two rows with one id. On `key={id}`
+                React warned about duplicates and reserved the right to drop
+                one, which is a report quietly losing a finding. */}
+            {list.map((cause, i) => (
+              <CauseCard key={`${cause.id}-${cause.scope}-${i}`} cause={cause} />
             ))}
           </section>
         ))
@@ -557,34 +585,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
         </section>
       )}
 
-      <Collapsible title="Passing" count={score.passed?.length ?? 0}>
-        <ul className="grid gap-x-6 gap-y-1.5 text-sm text-ink/70 sm:grid-cols-2">
-          {score.passed?.map((row: CheckRow) => (
-            <li key={row.id} className="flex gap-2">
-              <span className="text-emerald-600">✓</span>
-              <span>{row.pass}</span>
-            </li>
-          ))}
-        </ul>
-      </Collapsible>
-
-      <Collapsible title="Not checked" count={score.skipped?.length ?? 0}>
-        <p className="mb-3 text-sm text-ink/55">
-          These did not apply to this run and are not counted either way — a check that could not
-          run is not a check that passed.
-        </p>
-        <ul className="space-y-1.5 text-sm text-ink/70">
-          {score.skipped?.map((row: CheckRow) => (
-            <li key={row.id} className="flex gap-2">
-              <span className="text-ink/30">·</span>
-              <span>
-                {row.pass}
-                {row.why && <span className="text-ink/45"> — {row.why}</span>}
-              </span>
-            </li>
-          ))}
-        </ul>
-      </Collapsible>
+      <Inventory score={score} />
 
       <section className="card flex flex-wrap gap-2 p-5">
         <span className="t-eyebrow mr-2 self-center text-ink/45">Export</span>

@@ -55,6 +55,7 @@ read as its `src`.
 | `src/psi.mjs` | PageSpeed Insights |
 | `src/baseline.mjs` | Serialise and diff runs |
 | `src/report.mjs` | Terminal, Markdown, HTML, the baseline diff view, and the portfolio table |
+| `src/ai.mjs` | The answer-engine sheet — three pillars, their signals, and the weights. A **second scale**: it never moves `score`, and a pillar is scored out of what the run could ask rather than out of a fixed hundred |
 | `worker/index.mjs` | The optional hosted front end. Imports `audit` and `html`; re-implements nothing. Web-standard APIs only, so `node --test` can run it |
 
 ## Adding a check

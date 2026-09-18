@@ -43,6 +43,10 @@
 // all show the same number rather than four arithmetics that drift.
 
 import { categoryOf, CATEGORIES } from './areas.mjs';
+// Cyclic on purpose and safe: `ai.mjs` reads `gradeOf` back, and both sides of
+// the cycle are hoisted function declarations called at run time rather than
+// bindings read while the modules are still evaluating.
+import { aiReadiness } from './ai.mjs';
 
 /** What a check costs when it fails everywhere it could. An error is worth
  *  three warnings, which is the ratio the levels themselves already carry. */
@@ -375,6 +379,11 @@ export function scoreRun(findings, { pages = 0, applicable = {} } = {}) {
     failed,
     skipped,
     areas: areaScores(rows),
+    // A second, smaller sheet for the answer engines, on its own scale and
+    // taking nothing off this one. Attached here rather than returned beside
+    // it so that every front end already reading `score` gets it for free —
+    // there is exactly one place a report's numbers come from.
+    ai: aiReadiness(findings, { pages, applicable }),
   };
 }
 

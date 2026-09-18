@@ -78,6 +78,56 @@ function causeCost(cause, costs) {
   return points < 0.05 ? null : Math.round(points * 10) / 10;
 }
 
+/** The answer-engine sheet, in the terminal.
+ *
+ *  Short on purpose. It is a second scale and the reader has just read the
+ *  first one, so this says what the pillars are out of and what is worth
+ *  fixing, and leaves the rest to `--json` and the HTML report. The line
+ *  saying it costs the score nothing is not padding: without it two numbers
+ *  appear one under the other and get read as two tries at the same thing.
+ *
+ *  Skipped pillars are named rather than dropped, for the reason everything
+ *  here is named rather than dropped — a missing result reads like a pass. */
+function aiBlock(score, rule) {
+  const ai = score?.ai;
+  if (!ai) return [];
+  const lines = ['', rule('Answer engines'), ''];
+  lines.push(
+    `  ${scorePaint(ai.score)(bold(`${ai.score}`))}${dim('/100')}   ` +
+      `${scorePaint(ai.score)(bold(ai.grade))}   ${scorePaint(ai.score)(scoreBar(ai.score))}`,
+  );
+  lines.push(dim('  A separate scale. None of it moves the score above.'));
+  lines.push('');
+  for (const pillar of ai.pillars) {
+    const name = pillar.name.padEnd(19);
+    lines.push(
+      `  ${name}${scorePaint(pillar.score)(String(pillar.score).padStart(3))}${dim('/100')}  ` +
+        `${scorePaint(pillar.score)(scoreBar(pillar.score, 16))}  ` +
+        dim(
+          `${pillar.passed}/${pillar.passed + pillar.failed} passed` +
+            (pillar.skipped ? ` · ${pillar.skipped} not checked` : ''),
+        ),
+    );
+  }
+  // Worst first, and only the ones with something to hand back. A list that
+  // included the passing signals would be the whole table again.
+  const worst = ai.pillars
+    .flatMap((p) => p.signals.map((sig) => ({ ...sig, pillar: p.name })))
+    .filter((sig) => sig.state === 'failed' && sig.recoverable > 0)
+    .sort((a, b) => b.recoverable - a.recoverable)
+    .slice(0, 4);
+  if (worst.length) {
+    lines.push('');
+    lines.push(dim('  Worth the most, in that order:'));
+    for (const sig of worst) {
+      lines.push(`    ${yellow('•')} ${sig.label} ${dim(`(${sig.pillar}, +${sig.recoverable})`)}`);
+      lines.push(dim(`      ${sig.fix}`));
+    }
+  }
+  lines.push('');
+  return lines;
+}
+
 const SEVERE = new Set(['error', 'warn']);
 
 /** Every renderer takes the same third argument, so a caller that has a score
@@ -126,6 +176,7 @@ export function terminal(findings, meta, { score } = {}) {
     // The inventory is not a finding and does not belong to the list above, so
     // a clean site that was asked about its domain still gets the answer.
     lines.push(...hostBlock(findings, meta, rule));
+    lines.push(...aiBlock(score, rule));
     if (score?.passed?.length) lines.push(...passingBlock(score, rule));
     return lines.join('\n');
   }
@@ -194,6 +245,7 @@ export function terminal(findings, meta, { score } = {}) {
   }
 
   lines.push(...hostBlock(findings, meta, rule));
+  lines.push(...aiBlock(score, rule));
   lines.push(...passingBlock(score, rule));
 
   lines.push(
@@ -492,6 +544,52 @@ function scoreMarkdown(score) {
     out.push('| Area | Costing | Passing | Failing |');
     out.push('|---|--:|--:|--:|');
     for (const area of lost) out.push(`| ${area.name} | −${area.lost} | ${area.passed} | ${area.failed} |`);
+    out.push('');
+  }
+  out.push(...aiMarkdown(score));
+  return out;
+}
+
+/** The answer-engine sheet, in Markdown.
+ *
+ *  Longer than the terminal's, because a Markdown report is the one somebody
+ *  commits, diffs or sends to a client — it is read once carefully rather than
+ *  glanced at, so every signal gets its row and every failing one its fix. */
+function aiMarkdown(score) {
+  const ai = score?.ai;
+  if (!ai) return [];
+  const out = [];
+  out.push(`## Answer engines: ${ai.score}/100 (${ai.grade})`);
+  out.push('');
+  out.push(`\`${scoreBarPlain(ai.score)}\`  **${ai.score}**`);
+  out.push('');
+  out.push(
+    'A separate scale from the score above, and it takes nothing off it. Each pillar is scored ' +
+      'out of the signals this run was in a position to ask about, so a pillar with half its ' +
+      'checks skipped says so rather than banking the points.',
+  );
+  out.push('');
+  out.push('| Pillar | Score | Passing | Failing | Not checked |');
+  out.push('|---|--:|--:|--:|--:|');
+  for (const p of ai.pillars) {
+    out.push(`| ${p.name} | ${p.score}/100 (${p.grade}) | ${p.passed} | ${p.failed} | ${p.skipped} |`);
+  }
+  out.push('');
+
+  for (const pillar of ai.pillars) {
+    const failing = pillar.signals
+      .filter((sig) => sig.state === 'failed')
+      .sort((a, b) => (b.recoverable ?? 0) - (a.recoverable ?? 0));
+    if (!failing.length) continue;
+    out.push(`### ${pillar.name} — ${failing.length} to fix`);
+    out.push('');
+    for (const sig of failing) {
+      const where =
+        sig.scope === 'page' ? `on ${sig.pages} page${sig.pages === 1 ? '' : 's'}` : 'site-wide';
+      out.push(`- **${sig.label}** \`${sig.id}\` — ${where}, worth **+${sig.recoverable}** of this pillar.`);
+      out.push(`  ${sig.why}`);
+      out.push(`  *Fix:* ${sig.fix}`);
+    }
     out.push('');
   }
   return out;
@@ -946,6 +1044,57 @@ export function reportParts(findings, meta, { backHref, backLabel = 'New audit',
   </section>`;
   };
 
+  // --- The answer-engine sheet, as a second panel --------------------------
+  // Its own section rather than a row in the one above, because it is its own
+  // scale. Sharing the panel would put two hundreds side by side under one
+  // heading and invite them to be added up.
+  const aiSection = () => {
+    const ai = score?.ai;
+    if (!ai) return '';
+    const tone = (n) => (n >= 80 ? 'good' : n >= 60 ? 'fair' : 'poor');
+    const failing = ai.pillars
+      .flatMap((p) => p.signals.map((sig) => ({ ...sig, pillar: p.name })))
+      .filter((sig) => sig.state === 'failed')
+      .sort((a, b) => (b.recoverable ?? 0) - (a.recoverable ?? 0));
+    return `
+  <section class="ai" id="answer-engines">
+    <div class="aihead">
+      <h2>Answer engines <b class="${tone(ai.score)}">${ai.score}</b><small>/100 ${esc(ai.grade)}</small></h2>
+      <p class="lede">What ChatGPT, Claude, Perplexity and Gemini get when they read this site.
+      A separate scale from the score above, and it takes nothing off it.</p>
+    </div>
+    <ul class="areabars aipillars">${ai.pillars
+      .map(
+        (p) => `<li>
+      <span class="an">${esc(p.name)}</span>
+      <span class="ab"><i class="${tone(p.score)}" style="width:${p.score}%"></i></span>
+      <span class="av">${p.score}</span>
+    </li>`,
+      )
+      .join('')}</ul>
+    ${
+      failing.length
+        ? `<table class="aitable">
+      <thead><tr><th>Signal</th><th>Where</th><th class="n">To regain</th></tr></thead>
+      <tbody>${failing
+        .map(
+          (sig) => `<tr>
+        <td><b>${esc(sig.label)}</b><br><span class="fineprint">${esc(sig.fix)}</span></td>
+        <td>${esc(sig.pillar)} · ${
+            sig.scope === 'page' ? `${plural(sig.pages, 'page')}` : 'site-wide'
+          }</td>
+        <td class="n">+${sig.recoverable ?? 0}</td>
+      </tr>`,
+        )
+        .join('')}</tbody>
+    </table>`
+        : '<p class="fineprint">Every applicable answer-engine signal passed.</p>'
+    }
+    <p class="fineprint">Each pillar is scored out of the signals this run was in a position to ask
+    about. A signal that could not run is counted in neither direction.</p>
+  </section>`;
+  };
+
   // --- What passed, and what never came up --------------------------------
   // A report that only lists faults gives no way to tell a check that passed
   // from one that was never run. Both are named, and the second says why.
@@ -1216,6 +1365,21 @@ export function reportParts(findings, meta, { backHref, backLabel = 'New audit',
   .areabars .ab i { display: block; height: 100%; background: var(--warn); }
   .areabars .av { text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
   @media (max-width: 34rem) { .areabars li { grid-template-columns: 1fr 3rem; } .areabars .ab { grid-column: 1 / -1; } }
+  .ai { border: 1px solid var(--line); border-radius: 14px; padding: 1.1rem 1.25rem; margin: 1.5rem 0; }
+  .ai h2 { margin: 0; font-size: 1.05rem; display: flex; align-items: baseline; gap: .5rem; }
+  .ai h2 b { font-size: 1.6rem; }
+  .ai h2 small { color: var(--muted); font-weight: 400; }
+  .ai .lede { margin: .4rem 0 1rem; color: var(--muted); font-size: .88rem; }
+  .aipillars { margin-bottom: 1rem; }
+  .aipillars .ab i.good { background: var(--ok); }
+  .aipillars .ab i.fair { background: var(--warn); }
+  .aipillars .ab i.poor { background: var(--error); }
+  .aipillars .av { color: var(--fg); font-weight: 600; }
+  .ai h2 b.good { color: var(--ok); } .ai h2 b.fair { color: var(--warn); } .ai h2 b.poor { color: var(--error); }
+  .aitable { width: 100%; border-collapse: collapse; font-size: .85rem; }
+  .aitable th { text-align: left; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); padding: .35rem 0; }
+  .aitable td { border-bottom: 1px solid var(--line); padding: .55rem 0; vertical-align: top; }
+  .aitable td.n, .aitable th.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 
   /* What a fix is worth, beside the fix. */
   .causes .gain {
@@ -1479,6 +1643,8 @@ export function reportParts(findings, meta, { backHref, backLabel = 'New audit',
   ${groups.map(section).join('')}`
       : `<div class="clean"><b>Nothing to report</b><span>Every check passed on all ${meta.pages ?? 0} pages.</span></div>`
   }
+
+  ${aiSection()}
 
   ${hostTable()}
 

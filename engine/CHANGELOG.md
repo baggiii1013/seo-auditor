@@ -6,6 +6,34 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added
+- **A readiness score for answer engines, on its own scale.** `score.ai`, from
+  the new `src/ai.mjs`. The hundred-point score is a deduction sheet that prices
+  every check alike, which makes it the wrong instrument for this question:
+  most of what decides whether an assistant quotes a page is not a fault, so the
+  checklist scores almost none of it and the number that comes out says nothing
+  about answer engines at all.
+  - **Three pillars**, because they fail independently and different people fix
+    them. **Access** (robots.txt, `llms.txt`, the AI crawlers) is a domain
+    question. **Answer engines** — AEO, being the answer — is a page-structure
+    question. **Generative engines** — GEO, being cited in generated text — is a
+    what-is-on-the-page question, and its weights follow the effect sizes the
+    Princeton GEO study measured: citations largest, statistics second, quotes
+    third.
+  - **It takes nothing off the score.** Deleting `score.ai` from the payload
+    would not move a grade, and a test asserts it. The engine's promise that an
+    opportunity costs no points still holds.
+  - **A pillar is scored out of what it could ask**, not out of a fixed hundred.
+    Four checks cannot take 100 points off a 100-point sheet, so a pillar scored
+    that way could never fall below 72 and would read as a pass on a site that
+    does none of this. A signal that could not run is in neither half of the
+    share, and `coverage` says how much of the pillar was measured — a 100 at
+    40% coverage is a number that was not earned, and it says so.
+  - Each signal carries `sharePct` (what it is worth of its pillar),
+    `recoverable` (what fixing it hands back), and the pages it is on, so
+    "what should I do first" is answered by sorting rather than by reading.
+  - Shown in the terminal, the Markdown and the HTML report, so no front end
+    has a number the others do not.
+
 - **Four checks on what an assistant gets when it reads a page.** The AI area
   already answered "is an answer engine allowed in" — robots.txt, `llms.txt`,
   and the thirteen agents. It said nothing about what is there once it is. These

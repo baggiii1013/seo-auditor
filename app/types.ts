@@ -36,6 +36,58 @@ export type CheckRow = {
   why?: string;
 };
 
+// The answer-engine sheet from engine/src/ai.mjs. A second scale that takes
+// nothing off `score` — every field here is out of its own pillar, never out
+// of the hundred, and the report has to keep saying so or the two numbers get
+// read as one.
+export type AiState = 'passed' | 'failed' | 'skipped';
+
+export type AiSignal = {
+  id: string;
+  pillar: string;
+  label: string;
+  why: string;
+  fix: string;
+  weight: number;
+  scope: 'site' | 'page';
+  state: AiState;
+  pages: number;
+  /** Share of the crawl this signal is missing from, 0–1. Absent when skipped. */
+  spread?: number;
+  cost?: number;
+  /** What this signal is worth of its pillar, and what fixing it hands back.
+   *  Absent on a skipped signal, which is in no denominator. */
+  sharePct?: number;
+  recoverable?: number;
+  /** Present only on a skipped row: why the run was not in a position to ask.
+   *  Its own key, so `why` keeps meaning "why this matters" in every state. */
+  whySkipped?: string;
+};
+
+export type AiPillar = {
+  key: string;
+  name: string;
+  blurb: string;
+  score: number;
+  grade: string;
+  possible: number;
+  lost: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  /** How much of the pillar the run was in a position to ask about, 0–100. */
+  coverage: number;
+  signals: AiSignal[];
+};
+
+export type AiReadiness = {
+  score: number;
+  grade: string;
+  possible: number;
+  lost: number;
+  pillars: AiPillar[];
+};
+
 export type Score = {
   score: number | null;
   grade: string | null;
@@ -48,6 +100,8 @@ export type Score = {
   failed?: CheckRow[];
   skipped?: CheckRow[];
   areas?: { name: string; lost: number; passed: number; failed: number }[];
+  /** Null when the run had nothing to score for answer engines either. */
+  ai?: AiReadiness | null;
 };
 
 export type Meta = {

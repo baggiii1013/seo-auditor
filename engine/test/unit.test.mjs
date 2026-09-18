@@ -5371,3 +5371,188 @@ test('every flag the engine offers to enable is a flag the CLI parses', () => {
     assert.ok(cli.includes(`arg === '${flag}'`), `${flag} is offered and the CLI does not parse it`);
   }
 });
+
+// --- the answer-engine sheet -------------------------------------------------
+// A second scale, and the tests that matter are the ones proving it stays the
+// second scale: it never moves the hundred, and it never hands out a pass for
+// a question the run was not in a position to ask.
+
+const readiness = async (findings, applicable = {}, pages = 4) => {
+  const { aiReadiness } = await import('../src/ai.mjs');
+  return aiReadiness(findings, { pages, applicable });
+};
+
+const pillar = (ai, key) => ai.pillars.find((p) => p.key === key);
+
+const ALL_APPLICABLE = { substantial: true, contentRegions: true, llmsTxt: true };
+
+test('a site that does everything scores 100 on every pillar', async () => {
+  const ai = await readiness([], ALL_APPLICABLE);
+  assert.equal(ai.score, 100);
+  assert.equal(ai.grade, 'A');
+  for (const p of ai.pillars) assert.equal(p.score, 100, `${p.name} should be clean`);
+});
+
+test('the answer-engine sheet takes nothing off the hundred-point one', async () => {
+  // The whole premise. `geo-no-citations` is an opportunity, not a fault, and
+  // the moment it moves the grade the report is telling people to pad their
+  // writing to satisfy a checker.
+  const { scoreRun } = await import('../src/score.mjs');
+  const pages = { pages: 4, applicable: ALL_APPLICABLE };
+  const clean = scoreRun([], pages);
+  const uncited = scoreRun(
+    ['a', 'b', 'c', 'd'].map((p) => ({ level: 'info', id: 'geo-no-citations', url: `https://x.test/${p}` })),
+    pages,
+  );
+  assert.equal(uncited.score, clean.score, 'the hundred-point score should not have moved');
+  assert.ok(uncited.score.ai === undefined);
+  assert.ok(uncited.ai.pillars.find((p) => p.key === 'geo').score < 100, 'and the AI sheet should have');
+});
+
+test('a signal that could not run is in neither half of the share', async () => {
+  // Same refusal the checklist makes. A one-page site with nothing to quote
+  // has not passed the quoting checks — it was never asked.
+  const ai = await readiness([], { substantial: false, contentRegions: false, llmsTxt: false });
+  const geo = pillar(ai, 'geo');
+  assert.equal(geo.skipped, 4, 'the four that need content should be skipped');
+  assert.equal(geo.passed, 1, 'only prompt-injection applies to any page');
+  assert.ok(geo.coverage < 100, 'and coverage should say the run barely looked');
+  for (const row of geo.signals.filter((r) => r.state === 'skipped')) {
+    assert.ok(row.whySkipped, `${row.id} should say why it was skipped`);
+    assert.ok(row.why && row.why !== row.whySkipped,
+      `${row.id} should still say why it matters, on its own key`);
+  }
+});
+
+test('blocking an AI crawler is a decision, not a deduction', async () => {
+  // A publisher is entitled to refuse GPTBot, and a number that docked points
+  // for it would be grading somebody's licensing policy.
+  const blocked = await readiness([{ level: 'info', id: 'ai-crawler-blocked' }], ALL_APPLICABLE);
+  assert.equal(pillar(blocked, 'access').score, 100, 'a deliberate block costs nothing');
+  const row = pillar(blocked, 'access').signals.find((r) => r.id === 'ai-crawler-blocked');
+  assert.equal(row.weight, 0, 'and it is reported rather than counted');
+});
+
+test('a page-scope signal costs its share of the crawl, not all of it', async () => {
+  const one = await readiness(
+    [{ level: 'info', id: 'geo-no-quotes', url: 'https://x.test/a' }], ALL_APPLICABLE, 4,
+  );
+  const all = await readiness(
+    ['a', 'b', 'c', 'd'].map((p) => ({ level: 'info', id: 'geo-no-quotes', url: `https://x.test/${p}` })),
+    ALL_APPLICABLE, 4,
+  );
+  assert.ok(pillar(one, 'geo').lost < pillar(all, 'geo').lost,
+    'one page missing quotes should cost less than every page missing them');
+  assert.equal(pillar(all, 'geo').lost, 6, 'and all four should cost the signal its whole weight');
+});
+
+test('one page tripping a signal four times is one page', async () => {
+  // The distinct-pages rule, which is why a page with nine uncited claims is
+  // not nine pages missing citations.
+  const ai = await readiness(
+    Array.from({ length: 4 }, () => ({ level: 'info', id: 'geo-no-citations', url: 'https://x.test/a' })),
+    ALL_APPLICABLE, 4,
+  );
+  assert.equal(pillar(ai, 'geo').signals.find((r) => r.id === 'geo-no-citations').pages, 1);
+});
+
+test('a run with no page to score has no sheet either', async () => {
+  assert.equal(await readiness([], ALL_APPLICABLE, 0), null);
+});
+
+test('every signal names a pillar that exists, and says why and how', async () => {
+  // The table is the documentation. A signal with no `fix` is a finding that
+  // tells somebody they have a problem and not what to do about it.
+  const { SIGNALS, PILLARS } = await import('../src/ai.mjs');
+  const keys = new Set(PILLARS.map((p) => p.key));
+  const seen = new Set();
+  for (const s of SIGNALS) {
+    assert.ok(keys.has(s.pillar), `${s.id} is in unknown pillar ${s.pillar}`);
+    assert.ok(!seen.has(s.id), `${s.id} is declared twice`);
+    seen.add(s.id);
+    assert.ok(s.label?.length > 10, `${s.id} needs a real label`);
+    for (const field of ['why', 'fix']) {
+      assert.ok(s[field]?.length > 20, `${s.id} needs a real ${field}`);
+    }
+    assert.match(s.why, /[.?]$/, `${s.id}: why should be a sentence`);
+    assert.match(s.fix, /[.?]$/, `${s.id}: fix should be a sentence`);
+  }
+});
+
+test('every signal is a finding the engine can actually emit', async () => {
+  // The failure this is here to catch is a renamed check id leaving a signal
+  // that can never fire — which reads in the report as a site that passes it.
+  const { SIGNALS } = await import('../src/ai.mjs');
+  const sources = ['checks.mjs', 'site.mjs']
+    .map((f) => readFileSync(new URL(`../src/${f}`, import.meta.url), 'utf8'))
+    .join('\n');
+  for (const s of SIGNALS) {
+    assert.ok(sources.includes(`'${s.id}'`), `${s.id} is scored and nothing emits it`);
+  }
+});
+
+test('every signal belongs to the area the report files it under', async () => {
+  // Two tables naming the same checks, and a reader who clicks through from
+  // the AI panel to the area section should land on the same findings.
+  const { SIGNALS } = await import('../src/ai.mjs');
+  const { categoryOf: areaOf } = await import('../src/areas.mjs');
+  for (const s of SIGNALS) {
+    assert.notEqual(areaOf(s.id), 'Other', `${s.id} has no area`);
+  }
+});
+
+test('a signal says what share of its pillar it is worth', async () => {
+  // Canonry's sharePct, and for the same reason: a reader deciding what to fix
+  // first is asking "what is this worth", and a raw weight cannot answer that
+  // without knowing the denominator.
+  const ai = await readiness([{ level: 'info', id: 'geo-no-citations', url: 'https://x.test/a' }], ALL_APPLICABLE, 4);
+  const geo = pillar(ai, 'geo');
+  const shares = geo.signals.filter((r) => r.sharePct !== undefined);
+  assert.equal(shares.length, geo.passed + geo.failed, 'every asked signal carries a share');
+  assert.ok(Math.abs(shares.reduce((n, r) => n + r.sharePct, 0) - 100) <= 2,
+    'and the shares of a pillar add up to it');
+  const cited = geo.signals.find((r) => r.id === 'geo-no-citations');
+  assert.ok(cited.recoverable > 0, 'a failing signal says what fixing it hands back');
+  assert.ok(cited.recoverable <= cited.sharePct, 'and never more than it is worth');
+});
+
+test('a skipped signal claims no share of a pillar it was not asked about', async () => {
+  const ai = await readiness([], { substantial: false, contentRegions: false, llmsTxt: false });
+  for (const row of pillar(ai, 'geo').signals.filter((r) => r.state === 'skipped')) {
+    assert.equal(row.sharePct, undefined, `${row.id} was skipped and should claim nothing`);
+  }
+});
+
+test('every report format carries the answer-engine sheet', async () => {
+  // The engine's own rule, applied to a scale rather than a check: if a report
+  // from one front end can differ from a report from another, that is a bug.
+  // Computing `score.ai` and printing it in only one of them is that bug.
+  const { scoreRun } = await import('../src/score.mjs');
+  const findings = [{ level: 'info', id: 'geo-no-citations', url: 'https://x.test/a' }];
+  const meta = { origin: 'https://x.test', pages: 2, requests: 2, ms: 10, date: '2026-01-01', ignored: 0 };
+  const score = scoreRun(findings, { pages: 2, applicable: ALL_APPLICABLE });
+
+  const text = terminal(findings, meta, { score });
+  assert.match(text, /Answer engines/, 'the terminal should show it');
+  assert.match(text, /Generative engines/, 'and name the pillars');
+  assert.match(text, /Link out from inside the content/, 'and say how to fix the worst of it');
+
+  const md = markdown(findings, meta, { score });
+  assert.match(md, /## Answer engines: \d+\/100/, 'the Markdown should head it with the number');
+  assert.match(md, /geo-no-citations/, 'and name the signal');
+
+  const page = html(findings, meta, { score });
+  assert.match(page, /id="answer-engines"/, 'the HTML should give it an anchor');
+  assert.match(page, /Generative engines/, 'and name the pillars');
+});
+
+test('a report with no answer-engine sheet prints no empty section', async () => {
+  // `aiReadiness` returns null on a run it could not score, and a heading with
+  // nothing under it reads as a result.
+  const meta = { origin: 'https://x.test', pages: 0, requests: 1, ms: 5, date: '2026-01-01', ignored: 0 };
+  const score = { score: null, grade: null, why: 'No pages were crawled.' };
+  for (const [name, render] of [['terminal', terminal], ['markdown', markdown], ['html', html]]) {
+    assert.doesNotMatch(render([], meta, { score }), /Answer engines/,
+      `${name} should not print the section when there is no sheet`);
+  }
+});

@@ -222,6 +222,62 @@ The whole setup, the property-naming trap and what each failure note means:
 its URL. Missing credentials, or a property the account cannot read, are a note
 and the rest of the audit is unaffected.
 
+### What an answer engine gets
+
+Two questions, and the hundred-point score answers neither. It is a deduction
+sheet that prices every check alike, and most of what decides whether an
+assistant quotes a page is not a fault — a page with no statistics in it is not
+a broken page. So there is a second, smaller sheet beside it:
+
+```
+  -- Answer engines --------------------------------------------
+
+  93/100   A   ##########################..
+  A separate scale. None of it moves the score above.
+
+  Access             100/100  ################  4/4 passed
+  Answer engines      86/100  ##############..  2/4 passed
+  Generative engines  94/100  ###############.  3/5 passed
+
+  Worth the most, in that order:
+    - Pages answer a question in a liftable passage (Answer engines, +11)
+      Give the page a heading that asks what a reader would ask, and answer it
+      in the paragraph underneath.
+```
+
+Three pillars, because they fail independently and different people fix them:
+
+| Pillar | The question | Fixed by |
+|---|---|---|
+| **Access** | Is a crawler let in at all, and do robots.txt and llms.txt agree? | whoever owns the domain |
+| **Answer engines** (AEO) | Is there a passage to lift whole and attribute? | whoever writes the template |
+| **Generative engines** (GEO) | Does the page carry what a model weighs when it picks a source? | whoever writes the words |
+
+The field does not agree on those two words — [GEO
+Optimizer](https://github.com/Auriti-Labs/geo-optimizer-skill) treats AEO and
+GEO as synonyms, and [Canonry's aeo-audit](https://github.com/Canonry/aeo-audit)
+never uses "GEO" at all. The split above is this tool's, and the table is the
+definition it is using.
+
+Three rules it does not bend:
+
+- **It takes nothing off the score.** Delete `score.ai` from the payload and no
+  grade moves. The moment a missing statistic costs a point, the report is
+  telling people to pad their writing to satisfy a checker.
+- **A pillar is scored out of what it could ask.** Four checks cannot take 100
+  points off a 100-point sheet, so a pillar scored that way could never fall
+  below 72. Each is scored out of its own applicable total instead.
+- **A signal that could not run counts in neither direction.** `coverage` says
+  how much of a pillar was measured, because a 100 at 40% coverage is a number
+  nobody earned.
+
+Blocking GPTBot is not scored. It is a licensing decision a publisher is
+entitled to make, and a number that docked points for it would be grading
+somebody's business model — it is reported, at weight zero.
+
+Every signal carries what it is worth of its pillar, what fixing it hands back,
+and how many pages it is on, in `--json` under `score.ai`.
+
 ### Telling two readers apart
 
 ```bash

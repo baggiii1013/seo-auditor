@@ -18,6 +18,63 @@
      than added alongside, so every existing `ease-out` gets the good one. */
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
   --ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);
+
+  /* --- Chart colours -------------------------------------------------------
+     Not picked by eye. These are the status scale from the data-viz method,
+     validated against the surface they are actually drawn on — #ffffff, the
+     card, not the canvas — with `scripts/validate_palette.js`:
+
+       good     #0ca30c   3.35:1    passes the 3:1 mark contrast gate
+       critical #d03b3b   4.80:1    passes
+       warning  #fab219   1.83:1    below 3:1 — by design, see below
+       serious  #ec835a   2.64:1    below 3:1 — by design
+       info     #2a78d6   categorical slot 1, clears the gate
+
+     Warning and serious sit under 3:1 deliberately: the method's mitigation is
+     that a status colour never carries meaning alone. Every mark drawn in one
+     ships an icon and a text label beside it, so the colour is a second
+     channel rather than the only one. Adding contrast instead would have meant
+     leaving the documented scale, which is the thing the checks exist to stop.
+
+     Status, not categorical, because every series here *means* good or bad — a
+     failing check, a lost point. Categorical hues are for identity, and
+     spending one on "this is the bad one" is the collision the method names.
+
+     `--viz-track` is the unfilled half of a meter: one lighter step of the
+     fill's own ramp, mixed in oklab at use so a green meter gets a green
+     track and a red one a red track, rather than every meter running on grey. */
+  --color-viz-good: #0ca30c;
+  --color-viz-warning: #fab219;
+  --color-viz-serious: #ec835a;
+  --color-viz-critical: #d03b3b;
+  --color-viz-info: #2a78d6;
+  /* Not a status. "We did not look", which is a different thing from a pass
+     and from a failure, and it gets the one colour that claims neither. */
+  --color-viz-none: #c3c2b7;
+}
+
+/* A meter's track. `color-mix` keeps it a step of the fill's own hue without a
+   second token per status, and the fallback is the plain neutral. */
+.viz-track {
+  background: var(--color-line);
+}
+
+@supports (background: color-mix(in oklab, red 10%, white)) {
+  .viz-track {
+    background: color-mix(in oklab, var(--viz-fill) 16%, #fff);
+  }
+}
+
+/* Marks grow from a baseline rather than fading in, and the width is the datum
+   — so it is the only thing that animates. */
+.viz-grow {
+  transition: width 700ms var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-grow {
+    transition: none;
+  }
 }
 
 html {
