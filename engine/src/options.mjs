@@ -80,14 +80,11 @@ export const OPTIONS = [
   { flag: '--md', query: null, app: true, via: 'the Export menu' },
   { flag: '--html', query: null, app: true, via: 'the Export menu' },
 
-  { flag: '--no-open', query: null, app: 'the window is the browser this would open — it spawns --serve itself and draws the report natively, and the pipe it hands over is what already stops a browser appearing' },
-
   // --- deliberately not in a window ---------------------------------------
   { flag: '--help', query: null, app: 'a window has no command line to explain' },
   { flag: '--version', query: null, app: 'the sidebar shows it, and offers every other one' },
   { flag: '--quiet', query: null, app: 'the crawl log is on screen while it runs' },
   { flag: '--verbose', query: null, app: 'the crawl log is on screen while it runs' },
-  { flag: '--serve', query: null, app: 'the window is what --serve serves' },
   { flag: '--reports', query: null, app: 'the sidebar is this list, and it is always on' },
   { flag: '--fail-on', query: null, app: 'a window has no exit code for a build to read' },
   { flag: '--update-baseline', query: null, app: 'a baseline is a file a repository commits' },

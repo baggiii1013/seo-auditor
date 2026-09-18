@@ -326,8 +326,8 @@ test('a comparison refuses a body it cannot compare', async () => {
 });
 
 test('the presets are served rather than copied into every client', async () => {
-  // Behind the same gate as everything else. The Mac app never sees the gate:
-  // src/serve.mjs mints a token and adds the header on the way through.
+  // Behind the same gate as everything else. A local adapter never sees the
+  // gate: it mints a token and adds the header on the way through.
   assert.equal((await handle(get('/agents'), env())).status, 401, 'the gate holds here too');
 
   const res = await handle(get('/agents', { token: SECRET }), env());

@@ -12,18 +12,9 @@ node bin/seo-audit.mjs https://example.com --psi https://example.com/
 node bin/seo-audit.mjs https://example.com --psi "/journal/**" --psi-sample 3
 node bin/seo-audit.mjs https://example.com --verbose             # watch it work
 npm test                                                # the engine; no install, any platform
-npm run test:all                                        # and the macOS app's own suite
 ```
 
 Node 22 (`nvm use 22`). There is nothing to install and no build step.
-
-There are **two** suites and `npm test` runs one of them. `node --test` over
-`test/` is portable and needs nothing installed, which is the premise; the app's
-own suite is `swift test` over `mac/Tests/` and needs a toolchain most machines
-touching this repo do not have. `npm run test:all` runs both and says plainly
-when it could not run the second, because a suite that was skipped reads exactly
-like a suite that passed. 1.34.0 published while `swift test` was failing on
-main, which is why that script exists.
 
 `npm test` runs `node --test` over `test/`, serving its own fixture site on
 localhost so it works offline and cannot be broken by a real site changing.
@@ -64,8 +55,6 @@ read as its `src`.
 | `src/psi.mjs` | PageSpeed Insights |
 | `src/baseline.mjs` | Serialise and diff runs |
 | `src/report.mjs` | Terminal, Markdown, HTML, the baseline diff view, and the portfolio table |
-| `raycast/` | The Raycast extension. Imports the engine as `@nurkamol/seo-audit`, never `../../src` — a Store submission is that folder and nothing above it. `npm test` symlinks the package so a checkout still builds. After touching anything in there run `npm run lint` **in that folder**: `npm test` does not, and `ray publish` refuses on a Prettier complaint the build is happy with |
-| `desktop/` | The Tauri shell for Windows and Linux. `npm run stage` puts a Node and the engine inside it and then **starts what it staged**, because the first bundle shipped without `worker/` and produced an app that opened and waited. Named `stage`, not `prepare` — npm runs `prepare` on every install. It draws nothing: it starts `bin/seo-audit.mjs --serve 0`, reads the port off stdout and points a webview at it — the same thing `mac/SeoAudit/Engine.swift` does, in Rust. Needs a Rust toolchain; `npm run test:all` runs its tests and says so when it cannot. A control added here instead of to the served HTML is a control Windows has and macOS does not |
 | `worker/index.mjs` | The optional hosted front end. Imports `audit` and `html`; re-implements nothing. Web-standard APIs only, so `node --test` can run it |
 
 ## Adding a check
@@ -121,11 +110,8 @@ Optional, and not on the main path — the CLI is. Two rules keep it honest:
    passing one. Anything else that turns out not to work there gets the same
    treatment, never a silent omission.
 
-`worker/`, `raycast/` and `desktop/` are deliberately absent from `files` in
-`package.json`: the npx payload stays the CLI, and the deploy flow clones the
-repository anyway. `@raycast/api` is the same arrangement as Wrangler — a front
-end's dependency, installed only by somebody working on that front end, never
-reaching anybody who runs `npx github:nurkamol/seo-audit`.
+`worker/` is deliberately absent from `files` in `package.json`: the npx payload
+stays the CLI, and the deploy flow clones the repository anyway.
 Wrangler is never a dependency — Cloudflare runs `npx wrangler deploy` on their
 side. To try it locally you need Node 22 (wrangler refuses below that, even
 though the CLI itself is happy on 18):
@@ -147,37 +133,19 @@ git tag -a v0.4.0 -m "…" && git push --follow-tags
 git tag -f -a v1 -m "…" && git push -f origin v1   # only if compatible
 ```
 
-Bump the version in **four** files, not one — `package.json`,
-`desktop/package.json`, `desktop/src-tauri/tauri.conf.json` and
-`desktop/src-tauri/Cargo.toml`. The shell refuses to start when its version and
-the engine's disagree, so a half-finished bump ships bundles that cannot run.
-`npm test` fails on the disagreement, which is the only reason that is a note
-rather than an outage.
+The version lives in `package.json` alone.
 
-That is the whole procedure. Pushing the version tag runs three workflows and
-none of them needs a hand:
+That is the whole procedure. Pushing the version tag runs one workflow and it
+needs no hand:
 
-- **`macOS app`** builds and signs the app, **creates the GitHub release** if it
-  does not exist — titled from the tag's annotation, with that version's
-  CHANGELOG section as the notes — attaches the zip, and points the Homebrew
-  cask at the checksum it just built. Write the CHANGELOG entry before tagging
-  and the release writes itself; forget to, and the job says so in a warning and
-  falls back to generated notes rather than failing with the app already built.
 - **`npm`** publishes `@nurkamol/seo-audit` with provenance, and skips silently
   if that version is already on the registry.
-- **`Desktop shell`** builds the Windows and Linux bundles, installs and runs
-  each one on its own runner, and attaches them to that same release. It never
-  creates the release — it waits up to five minutes for the macOS job to, because
-  an empty one made first would lose both the title and the notes. It also
-  submits the winget manifest, or says in a warning that it did not: that needs a
-  `WINGET_TOKEN` secret with `public_repo` scope, and without it Windows copies
-  are never winget installs and are sent to the release page instead.
 
 `test` is deliberately not among them: it runs on the push to `main`, and the
 release commit is on `main`, so the suite has already gone green against that
 exact SHA by the time the tag lands. The gap is tagging a commit that is not on
-`main` — nothing would stop that publishing untested, because none of the three
-waits on the suite either way. Don't do that.
+`main` — nothing would stop that publishing untested, because the publish does
+not wait on the suite either way. Don't do that.
 
 `v1` floats forward with every backwards-compatible release, because projects
 reference `uses: nurkamol/seo-audit@v1`. A breaking change — a renamed flag, a

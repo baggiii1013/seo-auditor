@@ -14,7 +14,6 @@
 <p align="center">
   <a href="https://github.com/marketplace/actions/full-site-seo-audit"><img src="https://img.shields.io/badge/GitHub%20Marketplace-Full--site%20SEO%20Audit-f97316?logo=github&logoColor=white" alt="GitHub Marketplace"></a>
   <a href="https://github.com/nurkamol/seo-audit/actions/workflows/test.yml"><img src="https://github.com/nurkamol/seo-audit/actions/workflows/test.yml/badge.svg" alt="tests"></a>
-  <a href="https://github.com/nurkamol/seo-audit/releases/latest"><img src="https://img.shields.io/badge/Download-macOS%20app-0a0a0a?logo=apple&logoColor=white" alt="Download the macOS app"></a>
   <a href="https://www.npmjs.com/package/@nurkamol/seo-audit"><img src="https://img.shields.io/npm/v/@nurkamol/seo-audit?color=cb3837&logo=npm&logoColor=white&label=npm" alt="npm"></a>
   <a href="https://github.com/nurkamol/seo-audit/releases"><img src="https://img.shields.io/github/v/release/nurkamol/seo-audit?color=f97316" alt="release"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A518-3c873a" alt="node >= 18">
@@ -35,7 +34,7 @@
 npx @nurkamol/seo-audit https://example.com
 
 # Or from the repository, pinned to a major version. Same tool — but this clones
-# 16 MB of app sources and tests to get at a 115 kB crawler.
+# the tests and docs too, to get at a 115 kB crawler.
 npx github:nurkamol/seo-audit@v1 https://example.com
 
 # Or keep it, if you would rather just type `seo-audit`
@@ -46,25 +45,6 @@ Every `npx github:…` in the examples below works as `npx @nurkamol/seo-audit`
 or as a plain `seo-audit`; they are the same bytes, fetched differently.
 
 <p align="center"><img src="docs/terminal.svg" alt="Example output" width="820"></p>
-
-> ### Not a terminal person? There is a window.
->
-> **SEO Audit** for macOS is the same tool with a window instead of a prompt:
-> type a domain, press return, watch it crawl, and read the report as cards you
-> can expand, filter and search. No flags to learn, no output to redirect, and
-> nothing leaves your machine.
->
-> ```bash
-> brew tap nurkamol/seo-audit https://github.com/nurkamol/seo-audit
-> brew trust nurkamol/seo-audit
-> brew install --cask seo-audit
-> ```
->
-> It is a window over this engine, never a second copy of it — the checks are
-> the same ones the command line and the Action run, so the reports match. See
-> [A window instead of a terminal](#a-window-instead-of-a-terminal), or
-> [download it](https://github.com/nurkamol/seo-audit/releases/latest) if you
-> would rather not use Homebrew.
 
 ---
 
@@ -179,126 +159,6 @@ were actually read, not a score: seven pages the site points at constantly are
 worth more than ten it mentions once, and that is an ordering rather than a
 number out of a hundred.
 
-### A window instead of a terminal
-
-```bash
-node bin/seo-audit.mjs --serve          # http://127.0.0.1:4321
-```
-
-The same form the hosted version serves, on this machine: no account, no bill,
-and none of a Worker's limits — the crawl is bounded by what this computer will
-do, which is the only place a five-thousand-page site with `maxImageChecks`
-past a thousand fits.
-
-It is not a second implementation. `worker/index.mjs` is written against
-`Request` and `Response`, which Node has too, so the same file answers both and
-`src/serve.mjs` is thirty lines of adapter. Bound to the loopback address,
-which is the whole of its security model.
-
-There is a macOS app in [`mac/`](mac/README.md):
-
-```bash
-brew tap nurkamol/seo-audit https://github.com/nurkamol/seo-audit
-brew trust nurkamol/seo-audit          # Homebrew asks before running a third party's code
-brew install --cask seo-audit
-# or build it yourself — swiftc and the command line tools, nothing else
-./mac/build.sh --run
-```
-
-<p align="center"><img src="docs/shots/app.png" alt="The macOS app showing a real audit of astro.build: 60 pages, 232 findings, 37 things to change, scored 87 out of 100" width="820"></p>
-
-<p align="center"><em>A real run against astro.build — and the one error at the top is a link to a page that does not exist, which is the bug this tool was written to catch.</em></p>
-
-<p align="center"><img src="docs/shots/compare.png" alt="The compare sheet: docs.astro.build against astro.build, showing the 26 findings that appeared" width="820"></p>
-
-<p align="center"><em>Compare two runs: a site against itself last week, or one property against another. Different hosts are matched by path.</em></p>
-
-#### If you downloaded the zip instead: "SEO Audit is damaged and can't be opened"
-
-It is not damaged. The app is **ad-hoc signed** rather than notarised, because
-notarising needs a paid Apple Developer account this project does not have.
-macOS puts a `com.apple.quarantine` flag on anything a browser downloads, and
-for an app without a notarisation ticket Gatekeeper refuses it — with a message
-that says "damaged" and offers to move it to the Trash, which reads exactly like
-malware and is the single most confusing thing about installing this.
-
-**`brew install --cask seo-audit` does not have this problem.** Homebrew checks
-the download against a checksum written by the build that produced it, then
-clears the flag for you. That is the recommended route, and the rest of this
-section is for people who would rather not use Homebrew.
-
-If you downloaded the zip by hand, verify it first. Every release attaches a
-`SHA256SUMS.txt` covering all four downloads, and lists the same checksums in
-its notes — save it next to the file and:
-
-```bash
-shasum -a 256 --ignore-missing -c SHA256SUMS.txt
-```
-
-`--ignore-missing` because you almost certainly downloaded one of the four, not
-all of them. The same command verifies the `.deb`, the `.AppImage` and the
-`setup.exe`, which matters most on Windows, where the advice for SmartScreen is
-otherwise just "run it anyway".
-
-Then, once it matches, clear the flag:
-
-```bash
-xattr -dr com.apple.quarantine "/Applications/SEO Audit.app"
-```
-
-No `sudo`: the app is yours, in a directory you can write to, and the command
-works as you. If it ever answers `Operation not permitted`, the copy is owned by
-another user — `sudo xattr -dr com.apple.quarantine "/Applications/SEO Audit.app"`
-is the fallback, but reach for it second, not first.
-
-This is exactly what right-click → **Open** does in the Finder, minus the
-dialog. Do it because the checksum matched, not because a README said to — the
-same command on a file you have not checked is how people get hurt.
-
-Or avoid the question entirely and build it yourself, which produces a signature
-your own machine already trusts:
-
-```bash
-./mac/build.sh --run
-```
-
-SwiftUI throughout, Liquid Glass, and the report drawn natively: cause cards
-that expand into the pages they affect, filtering, search, and export as PDF,
-HTML, Markdown, CSV or JSON. Every finished run is kept, so a seven-minute
-crawl survives closing the window. No web view in it.
-
-It is a window over this engine and not a second one. The app runs
-`node bin/seo-audit.mjs --serve` as a child process and reads its stream, and
-the grouping into causes travels with the findings rather than being recomputed
-in Swift — a check written twice is a check that drifts. `Report.swift` keeps
-that seam explicit, so a Swift engine would be one more conformance and no
-change to anything above it.
-
-### In Raycast
-
-```
-Preview a Site     how big is this, and is it the right one — ~1s, 3 requests
-Audit a Site       crawl it and list what to change, worst first
-Recent Reports     runs the desktop app has already kept
-```
-
-`raycast/` is a Raycast extension for macOS and Windows. It imports the engine
-as the published `@nurkamol/seo-audit` package, so it re-implements nothing and
-its reports match the terminal's. Raycast runs Node, so unlike the hosted
-version the certificate checks work there.
-
-It is waiting for review in the Raycast Store. Until it is listed,
-[docs/raycast.md](docs/raycast.md) explains how to run it from this repository
-in about two minutes, on either platform.
-
-**Preview is the command it exists for.** A crawl takes minutes and a launcher
-is built for the second you spend in it, so the headline command is the engine's
-`--dry-run`: how many URLs the sitemap lists, how many would be checked, and
-where the weight of the site is. Auditing is capped by preference, and a
-thousand-page site is told to use the app or the terminal rather than left
-spinning.
-
-### What the pages actually do in Google
 
 ```bash
 node bin/seo-audit.mjs https://example.com --search-console
@@ -552,20 +412,21 @@ both, and it needs no vocabulary of login paths — which would only ever be the
 paths somebody thought of. The trade is a staging site redirecting `/` to `/en/`
 that goes unreported, which is the right way round to be wrong.
 
-It is **on by default in the macOS window and the Raycast extension, and off by
-default on the command line**. That is deliberate rather than an inconsistency:
-those two are watched by a person, where a few seconds buys a finding a crawl
-cannot otherwise see, and `npx` is a build step, where the same seconds are spent
+It is **on by default in the app, and off by default on the command line**.
+That is deliberate rather than an inconsistency: the app is watched by a
+person, where a few seconds buys a finding a crawl cannot otherwise see, and
+`npx` is a build step, where the same seconds are spent unasked and a third
+party gets called that nobody chose to call.
 unasked and a third party gets called that nobody chose to call.
 
 The inventory travels with every format the engine writes — terminal, Markdown,
-HTML, JSON, the baseline, the macOS window and its PDF export. In CSV it arrives
+HTML, JSON and the baseline. In CSV it arrives
 as rows at level `host`, the same way passing and not-checked rows already do,
 because a CSV holding two shapes is a CSV nothing can read in one go.
 
-The window reaches it from **Settings → Crawl**, and the Raycast extension from
-its preferences. The hosted deployment leaves it off unless `ALLOW_HOSTS` is set,
-because there a stranger would be spending one shared address's allowance.
+It is reached from **Settings → Crawl** in the app. The hosted deployment
+leaves it off unless `ALLOW_HOSTS` is set, because there a stranger would be
+spending one shared address's allowance.
 
 ### Sites without a sitemap
 
@@ -769,31 +630,6 @@ survivable in CI instead of being switched off in week two.
   if: always()
   with: { name: seo-audit, path: audit.md }
 ```
-
----
-
-## The window, on Linux and Windows
-
-The macOS app is a thin client over a local server, and that server runs anywhere Node does:
-
-```bash
-npx @nurkamol/seo-audit --serve
-```
-
-It opens a browser onto the same window the macOS app draws: a sidebar of kept runs down the left, the report beside it, score ring and all. Everything the command line takes is in the form — the same table that decides what the macOS window reaches decides what this draws, so neither can quietly fall behind the other. Finished runs are kept and listed at `/reports`, two of them can be compared, and on macOS it is **the same folder the app uses**: a crawl started in the window is in the browser's list a second later, because there is one folder rather than two.
-
-Nothing leaves the machine. It binds to the loopback address, which is the whole of its security model.
-
-There is also a **native window for Windows and Linux** built on exactly this: a
-Tauri shell that starts the same server and shows the same report, in
-[`desktop/`](desktop/README.md). It ships a Node inside it, so there is nothing
-to install first. Every release attaches a `setup.exe`, a `.deb` and an
-AppImage, each built on its own runner and then **installed and run there**
-before it is attached. It tells you when there is a new version and offers
-whatever is safe for the way you installed it — `winget upgrade` in place, or
-the command to run, or the release page.
-
-`--no-open` if you would rather it did not open a browser. It opens one when a person ran the command and never when something else did, so the macOS window — which spawns this — is unaffected.
 
 ---
 
@@ -1113,11 +949,10 @@ Two rules that keep the tool trustworthy:
 2. **No dependencies.** It must keep running with a bare `npx` on a machine with nothing installed.
 
 ```bash
-npm test          # the engine, the Worker and the extension — no install, any platform
-npm run test:all  # and the macOS app's own Swift suite, where there is a toolchain for it
+npm test          # the engine and the Worker — no install, any platform
 ```
 
-There are two suites and `npm test` runs one. Keeping it portable is the point — it works on a machine with nothing on it. `test:all` runs both and says plainly when it could not run the second, rather than exiting green having skipped half the work.
+The suite is portable on purpose — it works on a machine with nothing on it.
 
 See [ROADMAP.md](ROADMAP.md) for what is planned, [CHANGELOG.md](CHANGELOG.md) for what changed.
 
