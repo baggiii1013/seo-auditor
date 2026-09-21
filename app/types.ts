@@ -31,7 +31,12 @@ export type Cause = {
 export type CheckRow = {
   id: string;
   area: string;
-  pass: string;
+  /** The sentence for a check that held — so a *failed* row does not carry it.
+   *  scoreRun() builds three different shapes and only `passed` and `skipped`
+   *  get `pass`; `failed` gets cost, scope and pages instead. Declaring this
+   *  required is what let `row.pass.toLowerCase()` past the compiler and into
+   *  the filter, where it took the report down on the first keystroke. */
+  pass?: string;
   worst?: Level;
   why?: string;
 };
@@ -121,7 +126,9 @@ export type Report = {
   meta: Meta;
   findings: Finding[];
   causes: Cause[];
-  score: Score;
+  /** Absent, not null, when the run had nothing to score — an unreachable host
+   *  answers `done` with `{ meta, findings, causes }` and no `score` key. */
+  score?: Score;
   sitemap?: string;
   llms?: string;
   schema?: string;

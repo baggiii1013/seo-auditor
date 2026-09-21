@@ -15,12 +15,14 @@ export default function Home() {
   const missing = notInApp();
 
   return (
-    <main className="mx-auto max-w-4xl px-5 py-12 sm:py-20">
+    // `.shell` is 4xl until a report is on the page, then it is the display —
+    // see globals.css.
+    <main className="shell px-5 py-12 sm:py-20">
       <header className="mb-10">
-        <h1 className="t-display">
+        <h1 className="t-display text-page-ink">
           seo<span className="text-brand">.</span>auditor
         </h1>
-        <p className="t-lead mt-3 max-w-xl text-ink/60">
+        <p className="t-lead mt-3 max-w-xl text-page-ink/75">
           Crawls a site&rsquo;s sitemap and checks every page — metadata, structured data, links,
           images, redirects and site-wide config. Then the same pass asks what an answer engine
           gets: whether ChatGPT, Claude and Perplexity are let in, and whether there is anything
@@ -30,7 +32,9 @@ export default function Home() {
 
       <Auditor fields={fields} agents={{ browsers: BROWSER_NAMES, systems: OS_NAMES }} />
 
-      <details className="card mt-12 p-5">
+      <details className="card mt-12 max-w-4xl p-5">
+        {/* Stays at the measure it was written for even when the shell widens:
+            this is a two-column list of prose, not a chart. */}
         <summary className="cursor-pointer text-sm font-medium text-ink/55 transition-colors duration-150 ease-out hover:text-ink">
           What this window does not reach ({missing.length})
         </summary>
@@ -48,7 +52,7 @@ export default function Home() {
         </ul>
       </details>
 
-      <footer className="mt-10 text-xs leading-relaxed text-ink/40">
+      <footer className="mt-10 text-xs leading-relaxed text-page-ink/70">
         — see engine/UPSTREAM.txt. Runs are kept on this machine; list them with{" "}
         <code className="font-mono">seo-audit --reports</code>.
       </footer>

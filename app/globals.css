@@ -1,18 +1,88 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: var(--font-geist-sans);
+  --font-sans: var(--font-sans);
   --font-mono: var(--font-geist-mono);
+  --font-heading: var(--font-sans);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
 }
 
 @theme {
-  /* White cards on a warm grey canvas, one orange for anything that acts, near
-     black for ink. Chosen to sit in the Semrush family — not sampled from their
-     stylesheet, so treat them as ours to tune. */
-  --color-ink: #16151c;
-  --color-line: #e5e4ee;
-  --color-canvas: #f5f5f8;
+  /* Glass surfaces on a near-black page, one orange for anything that acts,
+     light ink. Chosen to sit in the Semrush family — not sampled from their
+     stylesheet, so treat them as ours to tune.
+
+     `--color-ink` is light because every surface in this app is now dark: the
+     cards are glass over `--color-page` and so is the floating chrome, so there
+     is no white left to write dark text on. Flipping it here rather than at the
+     ninety call sites is the whole point of it being a token — `text-ink/55`,
+     `bg-ink/[0.05]` and `border-ink/25` all invert together and stay in the
+     same relationship to each other.
+
+     `--color-line` and `--color-canvas` are alpha rather than solid for the
+     same reason glass is: a solid divider on a translucent surface reads as a
+     sticker on top of it, and the whole effect is that you can see through. */
+  --color-ink: #f2f1f6;
+  --color-line: rgb(255 255 255 / 0.14);
+  --color-canvas: rgb(255 255 255 / 0.05);
   --color-brand: #ff642d;
+
+  /* The page behind the cards. The same value as `--color-ink` today, and a
+     separate token anyway: one is a surface and the other is text, and the day
+     the text warms up by a step the floor should not follow it there.
+     `--color-canvas` stays light because it is not this — it is the recessed
+     tint *inside* a white card, under the stat tiles and the signal strip. */
+  --color-page: #16151c;
+
+  /* Text that sits on the page rather than on a card: the two page headings,
+     the crawl summary, the area labels between the columns, the footer.
+     The same value as `--color-ink` now that the cards are glass and the ink
+     is light on both — still its own token, because the two are measured
+     against different things. Page ink is read against the animated shader at
+     its brightest, card ink against a static film of glass, so the opacity
+     each one can afford moves independently. */
+  --color-page-ink: #f2f1f6;
 
   /* The built-in curves are too weak to read as deliberate. Overridden rather
      than added alongside, so every existing `ease-out` gets the good one. */
@@ -61,7 +131,9 @@
 
 @supports (background: color-mix(in oklab, red 10%, white)) {
   .viz-track {
-    background: color-mix(in oklab, var(--viz-fill) 16%, #fff);
+    /* Mixed toward transparent, not toward white: the track sits on glass now,
+       and a white-mixed track would be the one opaque thing on the surface. */
+    background: color-mix(in oklab, var(--viz-fill) 26%, transparent);
   }
 }
 
@@ -78,18 +150,23 @@
 }
 
 html {
-  color-scheme: light;
+  /* Native controls follow the app now: the crawl options are real `select`
+     elements and their dropdowns are drawn by the browser, not by this
+     stylesheet, so a light scheme would open a white menu out of a glass card. */
+  color-scheme: dark;
 }
 
 body {
-  background: var(--color-canvas);
+  background: var(--color-page);
   color: var(--color-ink);
   -webkit-font-smoothing: antialiased;
 }
 
 ::selection {
   background: #ffdccd;
-  color: var(--color-ink);
+  /* The page colour, not the ink: the ink is light now and the highlight is
+     still a warm near-white, so the one place they meet has to invert. */
+  color: var(--color-page);
 }
 
 /* Anchor jumps in a long report. Gated, because a smooth scroll across ten
@@ -102,20 +179,23 @@ body {
 
 /* Floating chrome: a translucent layer the report scrolls under, rather than an
    opaque strip that eats a band of the viewport. */
+/* The same glass as a card, a step denser: this one floats over the report
+   rather than holding it, so it has to stay legible against whatever scrolls
+   underneath instead of against the page alone. */
 .chrome {
-  background: rgb(255 255 255 / 0.84);
+  background: rgb(12 11 17 / 0.72);
   backdrop-filter: blur(24px) saturate(180%);
 }
 
-@supports not (backdrop-filter: blur(1px)) {
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .chrome {
-    background: #fff;
+    background: #2a2931;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
   .chrome {
-    background: #fff;
+    background: #2a2931;
     backdrop-filter: none;
   }
 }
@@ -156,11 +236,100 @@ body {
   letter-spacing: -0.02em;
 }
 
+/* Every surface in the app. One rule, because all eleven call sites already
+ * said `card` — so the glass lands everywhere without a single component
+ * touched, and without the browser being asked to run eleven more filters than
+ * it already is.
+ *
+ * The recipe is the non-SVG dark branch of components/GlassSurface.tsx, lifted
+ * verbatim: a white film to lift the surface off the page, a blur that saturates
+ * what it picks up, and two inset hairlines for the lit top edge and the shaded
+ * bottom one. GlassSurface itself is not used for these — it sizes to a fixed
+ * width and height and centres its children with flex, which folds a card full
+ * of flow content into one row. It is built for chrome, not for prose.
+ *
+ * The film is smoked rather than white, which is the one place this departs
+ * from GlassSurface. A white film assumes a mid-tone backdrop; ours is an
+ * animated shader that lifts to rgb(105,105,105) wherever a streak passes
+ * behind a card, and light text on that measured 2.66:1. Darkening the film
+ * instead of brightening ninety text tints fixes every one of them at once,
+ * and the streaks still read through it — which is the point of the glass. */
 .card {
-  background: #fff;
+  background: rgb(12 11 17 / 0.55);
+  backdrop-filter: blur(16px) saturate(1.6);
   border: 1px solid var(--color-line);
   border-radius: 1rem;
-  box-shadow: 0 1px 2px rgb(22 21 28 / 0.04);
+  box-shadow:
+    inset 0 1px 0 0 rgb(255 255 255 / 0.11),
+    inset 0 -1px 0 0 rgb(255 255 255 / 0.04),
+    0 8px 28px rgb(0 0 0 / 0.28);
+}
+
+/* No blur available, or asked not to see through things: go opaque rather than
+   leave a 5% film over an animated background with text on top of it. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .card {
+    background: #24232b;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .card {
+    background: #24232b;
+    backdrop-filter: none;
+  }
+}
+
+/* The page is as wide as whatever is in it. A report flows through a masonry
+ * and wants the display; the URL field and the options above it do not — an
+ * input stretched across 1600px is not using the space, it is just long.
+ *
+ * `:has()` rather than a prop, because the width is a fact about the content
+ * and the content is three components below the element that has to carry it. */
+.shell {
+  margin-inline: auto;
+  max-width: 56rem;
+}
+
+.shell:has(.masonry) {
+  max-width: 100rem;
+
+  /* `width` alongside the cap, and only here. The body is a column flex
+     container, so an auto inline margin stops this stretching and sizes it to
+     fit-content instead — at 56rem that was invisible, but at 100rem it means
+     the widest card in the report decides how wide the page is, and a laptop
+     gets a horizontal scrollbar. A definite width puts the cap back in charge. */
+  width: 100%;
+}
+
+/* The report's cards, flowed rather than stacked.
+ *
+ * Multi-column, not a grid: the cards have no relationship to each other across
+ * a row, so a grid would only buy ragged whitespace under whichever card in the
+ * row is shortest. `break-inside: avoid` keeps each card whole and the browser
+ * balances the columns around them.
+ *
+ * `column-count` stays at one until there is room for a second: a card at half
+ * of 900px is narrower than the charts inside it want to be. */
+.masonry {
+  column-gap: 1.5rem;
+}
+
+.masonry > * {
+  break-inside: avoid;
+  margin-bottom: 1.5rem;
+}
+
+@media (min-width: 64rem) {
+  .masonry {
+    column-count: 2;
+  }
+}
+
+@media (min-width: 96rem) {
+  .masonry {
+    column-count: 3;
+  }
 }
 
 /* The crawl streams SSE and React re-renders on every line, so the loader is a
@@ -263,5 +432,86 @@ body {
   .enter-scale {
     transition: opacity 200ms ease;
     transform: none;
+  }
+}
+
+:root {
+  --background: oklch(1 0 0);
+  --foreground: oklch(0.145 0 0);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.145 0 0);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.145 0 0);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.97 0 0);
+  --secondary-foreground: oklch(0.205 0 0);
+  --muted: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.556 0 0);
+  --accent: oklch(0.97 0 0);
+  --accent-foreground: oklch(0.205 0 0);
+  --destructive: oklch(0.577 0.245 27.325);
+  --border: oklch(0.922 0 0);
+  --input: oklch(0.922 0 0);
+  --ring: oklch(0.708 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --radius: 0.625rem;
+  --sidebar: oklch(0.985 0 0);
+  --sidebar-foreground: oklch(0.145 0 0);
+  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.97 0 0);
+  --sidebar-accent-foreground: oklch(0.205 0 0);
+  --sidebar-border: oklch(0.922 0 0);
+  --sidebar-ring: oklch(0.708 0 0);
+}
+
+.dark {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.985 0 0);
+  --card: oklch(0.205 0 0);
+  --card-foreground: oklch(0.985 0 0);
+  --popover: oklch(0.205 0 0);
+  --popover-foreground: oklch(0.985 0 0);
+  --primary: oklch(0.922 0 0);
+  --primary-foreground: oklch(0.205 0 0);
+  --secondary: oklch(0.269 0 0);
+  --secondary-foreground: oklch(0.985 0 0);
+  --muted: oklch(0.269 0 0);
+  --muted-foreground: oklch(0.708 0 0);
+  --accent: oklch(0.269 0 0);
+  --accent-foreground: oklch(0.985 0 0);
+  --destructive: oklch(0.704 0.191 22.216);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.556 0 0);
+  --chart-1: oklch(0.87 0 0);
+  --chart-2: oklch(0.556 0 0);
+  --chart-3: oklch(0.439 0 0);
+  --chart-4: oklch(0.371 0 0);
+  --chart-5: oklch(0.269 0 0);
+  --sidebar: oklch(0.205 0 0);
+  --sidebar-foreground: oklch(0.985 0 0);
+  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent-foreground: oklch(0.985 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.556 0 0);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  html {
+    @apply font-sans;
   }
 }

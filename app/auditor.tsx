@@ -26,10 +26,10 @@ type Plan = {
 type Agents = { browsers: string[]; systems: string[] };
 
 const input =
-  'w-full rounded-lg border border-line bg-white px-3 py-2 text-sm text-ink outline-none transition duration-150 ease-out placeholder:text-ink/35 focus:border-brand focus:ring-2 focus:ring-brand/15';
+  'w-full rounded-lg border border-line bg-white/[0.06] px-3 py-2 text-sm text-ink outline-none transition duration-150 ease-out placeholder:text-ink/50 focus:border-brand focus:ring-2 focus:ring-brand/15';
 
 const ghost =
-  'rounded-lg border border-line bg-white px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
+  'rounded-lg border border-line bg-white/[0.06] px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
 
 const solid =
   'rounded-lg bg-brand px-5 py-2 text-sm font-medium text-white shadow-sm transition duration-150 ease-out hover:bg-[#ef5314] active:scale-[0.98] disabled:opacity-35 disabled:active:scale-100';
@@ -224,7 +224,7 @@ function Crawl({
       </section>
 
       {error && (
-        <div className="rounded-xl border border-rose-500/25 bg-rose-50 p-4 text-sm text-rose-700">
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
           {error}
         </div>
       )}
@@ -396,7 +396,7 @@ export default function Auditor({ fields, agents }: { fields: Field[]; agents: A
       </div>
 
       {error && (
-        <div className="rounded-xl border border-rose-500/25 bg-rose-50 p-4 text-sm text-rose-700">
+        <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 p-4 text-sm text-rose-200">
           {error}
         </div>
       )}

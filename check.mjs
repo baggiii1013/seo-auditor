@@ -32,6 +32,21 @@ for (const key of ['meta', 'findings', 'causes', 'score']) {
 }
 assert.equal(typeof report.score.score, 'number', 'nothing was scored');
 
+// 2b. The three row shapes scoreRun() returns are not the same shape, and
+//     app/report.tsx has to read all three through one list. A failed row has
+//     no `pass` — asserted here rather than assumed, because assuming it is
+//     how `row.pass.toLowerCase()` reached the check filter and took the whole
+//     report down on the first keystroke someone typed into it.
+for (const row of report.score.passed ?? []) {
+  assert.equal(typeof row.pass, 'string', `passed row ${row.id} lost its sentence`);
+}
+if (report.score.failed?.length) {
+  assert.ok(
+    report.score.failed.every((row) => row.id && row.area),
+    'a failed row arrived without an id or an area to label it by',
+  );
+}
+
 // 3. Every export writer stays in the engine — app/report.tsx formats nothing
 //    itself, so this is the only thing standing between it and a saved file.
 const rendered = {};
@@ -59,4 +74,25 @@ assert.deepEqual(
   'the UI tally and the Markdown disagree',
 );
 
-console.log(`ok — proxy, stream and all three writers, against ${site} (scored ${report.score.score})`);
+// 5. A host that answers nothing. The engine finishes normally and reports it
+//    as a finding, but the done payload carries no `score` key at all — so
+//    anything reading `report.score.score` throws on a plain typo in the URL
+//    box, which is the most ordinary way to use this thing wrong.
+const dead = await fetch(
+  api(`stream?url=${encodeURIComponent('https://this-site-does-not-exist-9f2a7c.com')}&format=json`),
+);
+const deadBody = await dead.text();
+const deadDone = deadBody.split('event: done\ndata: ')[1];
+assert.ok(deadDone, 'an unreachable host never produced a done event');
+const deadReport = JSON.parse(deadDone.split('\n\n')[0]);
+assert.ok(
+  deadReport.score === undefined || deadReport.score.score === null,
+  'an unreachable host must score null or not at all, never a number',
+);
+assert.ok(
+  deadReport.causes?.some((cause) => cause.id === 'unreachable'),
+  'nothing in the report says the site never answered',
+);
+
+console.log(`ok — proxy, stream, row shapes, unreachable host and all three writers,
+     against ${site} (scored ${report.score.score})`);

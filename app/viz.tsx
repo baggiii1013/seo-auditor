@@ -248,7 +248,7 @@ export function BarRow({
         </span>
         <span className="t-num shrink-0 text-xs tabular-nums text-ink/70">{display}</span>
       </span>
-      <span className="t-num shrink-0 text-xs tabular-nums text-ink/40">{trailing}</span>
+      <span className="t-num shrink-0 text-xs tabular-nums text-ink/55">{trailing}</span>
     </Row>
   );
 }

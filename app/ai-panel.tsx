@@ -71,7 +71,7 @@ function PillarTile({ pillar }: { pillar: AiPillar }) {
         </span>
       </div>
 
-      <div className="t-eyebrow mt-1 flex items-baseline justify-between gap-2 text-ink/40">
+      <div className="t-eyebrow mt-1 flex items-baseline justify-between gap-2 text-ink/55">
         <span className="truncate">out of 100</span>
         <span className="shrink-0">
           {pillar.grade} · {bandOf(pillar.score)}
@@ -90,7 +90,7 @@ function PillarTile({ pillar }: { pillar: AiPillar }) {
           caveat, not a statistic: the reason a good number here might not have
           been earned. */}
       {pillar.coverage < 100 && (
-        <p className="mt-1 text-xs text-ink/40">Measured on {pct(pillar.coverage)} of this pillar</p>
+        <p className="mt-1 text-xs text-ink/55">Measured on {pct(pillar.coverage)} of this pillar</p>
       )}
       <p className="mt-3 text-xs leading-relaxed text-ink/45">{PILLAR_NOTE[pillar.key]}</p>
     </a>
@@ -137,7 +137,7 @@ function SignalRow({ signal, pages }: { signal: AiSignal; pages: number }) {
                   ? `On ${signal.pages} of ${pages} ${pages === 1 ? 'page' : 'pages'} · ${pct((signal.spread ?? 0) * 100)} of the crawl`
                   : 'Site-wide'}
                 {signal.recoverable ? (
-                  <span className="text-ink/40">
+                  <span className="text-ink/55">
                     {' '}
                     · fixing it returns {signal.recoverable} of this pillar&rsquo;s 100
                   </span>
@@ -174,7 +174,7 @@ function SignalRow({ signal, pages }: { signal: AiSignal; pages: number }) {
 
         <span
           aria-hidden
-          className={`mt-0.5 shrink-0 text-ink/30 transition-transform duration-200 ease-out ${open ? 'rotate-90' : ''}`}
+          className={`mt-0.5 shrink-0 text-ink/45 transition-transform duration-200 ease-out ${open ? 'rotate-90' : ''}`}
         >
           ›
         </span>
@@ -185,7 +185,7 @@ function SignalRow({ signal, pages }: { signal: AiSignal; pages: number }) {
           <p className="text-sm leading-relaxed text-ink/65">{signal.why}</p>
           {!skipped && (
             <p className="text-sm leading-relaxed">
-              <span className="t-eyebrow mr-2 text-ink/40">Fix</span>
+              <span className="t-eyebrow mr-2 text-ink/55">Fix</span>
               <span className="text-ink/75">{signal.fix}</span>
             </p>
           )}
@@ -218,14 +218,14 @@ function PillarSection({ pillar, pages }: { pillar: AiPillar; pages: number }) {
           <span className="text-2xl font-semibold" style={{ color }}>
             {pillar.score}
           </span>
-          <span className="t-eyebrow text-ink/40">
+          <span className="t-eyebrow text-ink/55">
             {pillar.grade} · {bandOf(pillar.score)}
           </span>
         </div>
       </div>
       <div className="flex items-center justify-between gap-4 border-t border-line bg-canvas px-5 py-2">
-        <span className="t-eyebrow text-ink/40">Signal</span>
-        <span className="t-eyebrow hidden w-24 shrink-0 text-ink/40 sm:block">To regain</span>
+        <span className="t-eyebrow text-ink/55">Signal</span>
+        <span className="t-eyebrow hidden w-24 shrink-0 text-ink/55 sm:block">To regain</span>
       </div>
       <ul>
         {signals.map((signal) => (
@@ -239,8 +239,11 @@ function PillarSection({ pillar, pages }: { pillar: AiPillar; pages: number }) {
 export default function AiPanel({ ai, pages }: { ai: AiReadiness; pages: number }) {
   const color = gradeColor(ai.grade);
 
+  // A fragment, not a wrapper. The report flows these cards through a masonry
+  // (`.masonry` in globals.css), which reaches its children with `> *` — a div
+  // around them would be one very tall column item instead of nine cards.
   return (
-    <div className="space-y-4">
+    <>
       <section className="card p-6">
         <div className="flex flex-wrap items-start justify-between gap-6">
           <div className="min-w-0 max-w-xl">
@@ -264,7 +267,7 @@ export default function AiPanel({ ai, pages }: { ai: AiReadiness; pages: number 
             <div className="text-[3rem] leading-none font-semibold" style={{ color }}>
               {ai.score}
             </div>
-            <div className="t-eyebrow mt-2 text-ink/40">
+            <div className="t-eyebrow mt-2 text-ink/55">
               {ai.grade} · {bandOf(ai.score)}
             </div>
           </div>
@@ -275,11 +278,14 @@ export default function AiPanel({ ai, pages }: { ai: AiReadiness; pages: number 
         </div>
       </section>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {ai.pillars.map((pillar) => (
-          <PillarTile key={pillar.key} pillar={pillar} />
-        ))}
-      </div>
+      {/* Loose in the flow rather than in a three-column grid of their own. The
+          grid was there to put the three meters on one line so they could be
+          compared; the chart below does that job properly, and nesting a grid
+          inside a masonry column gave each tile a third of a third of the
+          screen. */}
+      {ai.pillars.map((pillar) => (
+        <PillarTile key={pillar.key} pillar={pillar} />
+      ))}
 
       <ChartFrame
         title="What each pillar was able to check"
@@ -328,6 +334,6 @@ export default function AiPanel({ ai, pages }: { ai: AiReadiness; pages: number 
       {ai.pillars.map((pillar) => (
         <PillarSection key={pillar.key} pillar={pillar} pages={pages} />
       ))}
-    </div>
+    </>
   );
 }
