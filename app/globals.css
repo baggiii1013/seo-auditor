@@ -138,13 +138,52 @@
 }
 
 /* Marks grow from a baseline rather than fading in, and the width is the datum
-   — so it is the only thing that animates. */
+   — so it is the only thing that animates.
+ *
+ * The @starting-style is what makes that true. A transition does not fire on
+ * the first style resolution of an element, and every mark here is mounted at
+ * its final width — so for as long as this rule stood alone it described an
+ * animation nobody had ever seen.
+ *
+ * The width comes in as `--viz-w` rather than as an inline `width`, which is
+ * the other half of the fix: the style attribute outranks every author rule,
+ * so a mark carrying its own `width: 42%` would win the starting-style cascade
+ * against this block and mount at full length exactly as before. A custom
+ * property is not the animated property, so it does not compete. */
 .viz-grow {
+  width: var(--viz-w);
   transition: width 700ms var(--ease-out);
 }
 
-@media (prefers-reduced-motion: reduce) {
+@starting-style {
   .viz-grow {
+    width: 0;
+  }
+}
+
+/* The score ring fills from empty on the same curve. Its own rule rather than
+   .viz-grow because the datum is an offset rather than a width, and the empty
+   value is the circumference of that particular circle — so it comes in from
+   the component as a custom property.
+ *
+ * The offset itself stays a presentation attribute on the element: an author
+ * rule outranks one, which is what lets @starting-style set the first frame.
+ * Moving it to an inline style would outrank this rule and kill the sweep. */
+.ring-grow {
+  transition: stroke-dashoffset 700ms var(--ease-out);
+}
+
+@starting-style {
+  .ring-grow {
+    stroke-dashoffset: var(--ring-circumference);
+  }
+}
+
+/* Size is the one entrance that has nothing gentler to fall back to — a mark
+   at its full length is the thing being asked for. */
+@media (prefers-reduced-motion: reduce) {
+  .viz-grow,
+  .ring-grow {
     transition: none;
   }
 }

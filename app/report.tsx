@@ -72,7 +72,8 @@ function Ring({ score, grade }: { score: number; grade: string }) {
           strokeLinecap="round"
           strokeDasharray={circumference}
           strokeDashoffset={circumference * (1 - score / 100)}
-          className="transition-[stroke-dashoffset] duration-1000 ease-out"
+          className="ring-grow"
+          style={{ ['--ring-circumference' as string]: circumference }}
         />
       </svg>
       <div className="absolute text-center">
@@ -259,7 +260,7 @@ function Inventory({ score, causes }: { score: Score; causes: Cause[] }) {
               key={key}
               onClick={() => setFilter(key)}
               aria-pressed={filter === key}
-              className={`t-eyebrow rounded-full border px-3 py-1.5 transition-colors duration-150 ease-out ${
+              className={`t-eyebrow rounded-full border px-3 py-1.5 transition duration-150 ease-out active:scale-[0.97] ${
                 filter === key
                   ? 'border-ink/25 bg-ink/[0.05] text-ink'
                   : 'border-line text-ink/50 hover:border-ink/25 hover:text-ink'
@@ -371,7 +372,7 @@ function CauseCard({ cause }: { cause: Cause }) {
           {shown.length > 0 && (
             <ul className="mt-3 space-y-1">
               {shown.map((page) => (
-                <li key={page} className="truncate font-mono text-xs">
+                <li key={page} className="enter-fade truncate font-mono text-xs">
                   <a
                     href={page}
                     target="_blank"

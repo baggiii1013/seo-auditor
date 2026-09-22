@@ -91,7 +91,10 @@ export function Meter({
     >
       <div
         className="viz-grow h-full rounded-full"
-        style={{ width: `${Math.max(0, Math.min(100, value))}%`, background: fill }}
+        style={{
+          ['--viz-w' as string]: `${Math.max(0, Math.min(100, value))}%`,
+          background: fill,
+        }}
       />
     </div>
   );
@@ -125,14 +128,21 @@ export function ChartFrame({
           onClick={() => setAsTable((v) => !v)}
           aria-expanded={asTable}
           aria-controls={id}
-          className="t-eyebrow shrink-0 rounded-full border border-line px-3 py-1.5 text-ink/50 transition-colors duration-150 ease-out hover:border-ink/25 hover:text-ink"
+          className="t-eyebrow shrink-0 rounded-full border border-line px-3 py-1.5 text-ink/50 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.97]"
         >
           {asTable ? 'Chart' : 'Table'}
         </button>
       </div>
       {legend && <div className="mt-4">{legend}</div>}
       <div id={id} className="mt-4">
-        {asTable ? <div className="enter-fade overflow-x-auto">{table}</div> : children}
+        {/* Both branches, not just the table one. The same toggle fading one
+            way and snapping the other is the reader being told the two views
+            are different kinds of thing, which they are not. */}
+        {asTable ? (
+          <div className="enter-fade overflow-x-auto">{table}</div>
+        ) : (
+          <div className="enter-fade">{children}</div>
+        )}
       </div>
     </section>
   );
@@ -242,7 +252,7 @@ export function BarRow({
           {pct > 0 && (
             <span
               className="viz-grow absolute inset-y-0 left-0 rounded-r-[4px]"
-              style={{ width: `${pct}%`, background: fill }}
+              style={{ ['--viz-w' as string]: `${pct}%`, background: fill }}
             />
           )}
         </span>
@@ -276,7 +286,7 @@ export function StackedBar({
           title={`${seg.label}: ${seg.value}`}
           className="viz-grow h-full first:rounded-l-full last:rounded-r-full"
           style={{
-            width: `${(seg.value / total) * 100}%`,
+            ['--viz-w' as string]: `${(seg.value / total) * 100}%`,
             background: seg.color,
             // The spacer. White doing the separating, on every segment but the
             // first, so a run of segments never fuses into one block.
