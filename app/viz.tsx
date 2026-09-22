@@ -44,17 +44,30 @@ export const bandOf = (score: number) =>
 /** The icon half of "never colour alone". Text, not an SVG set: it is read by
  *  a screen reader as the word it is labelled with, and it cannot drift from
  *  the colour it sits beside. */
-export function StateDot({ state, size = 'sm' }: { state: 'passed' | 'failed' | 'skipped'; size?: 'sm' | 'md' }) {
+export function StateDot({
+  state,
+  size = 'sm',
+  label,
+}: {
+  state: 'passed' | 'failed' | 'skipped';
+  size?: 'sm' | 'md';
+  /** What this particular dot means, when "Passed" is the wrong word for it.
+   *  The three states are also present/missing/unknown when the subject is a
+   *  file in a repository rather than a check — same mark, same colour, and a
+   *  screen reader should hear the noun that is actually true. */
+  label?: string;
+}) {
   const look = {
     passed: { bg: 'var(--color-viz-good)', mark: '✓', label: 'Passed' },
     failed: { bg: 'var(--color-viz-critical)', mark: '!', label: 'Failed' },
     skipped: { bg: 'var(--color-viz-none)', mark: '·', label: 'Not checked' },
   }[state];
+  const name = label ?? look.label;
   return (
     <span
       role="img"
-      aria-label={look.label}
-      title={look.label}
+      aria-label={name}
+      title={name}
       className={`grid shrink-0 place-items-center rounded-full font-bold text-white ${
         size === 'md' ? 'size-5 text-[11px]' : 'size-4 text-[10px]'
       }`}

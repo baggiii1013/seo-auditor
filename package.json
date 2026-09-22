@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "check": "node check.mjs"
+    "check": "node check.mjs",
+    "test:app": "node --no-warnings --test lib/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

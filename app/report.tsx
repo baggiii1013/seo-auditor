@@ -3,6 +3,7 @@
 import { useMemo, useState } from 'react';
 
 import AiPanel from './ai-panel';
+import GitPanel from './git-panel';
 import { LEVELS, type Cause, type CheckRow, type Level, type Report, type Score } from './types';
 import {
   bandOf,
@@ -482,6 +483,10 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
             {meta.notIndexable ? ` · ${meta.notIndexable} not indexable` : ''}
             {meta.ignored ? ` · ${meta.ignored} findings silenced by config` : ''}
           </p>
+          {/* Context for the numbers below rather than a finding among them,
+              so it goes in the header beside the crawl summary and not into
+              the masonry. */}
+          <GitPanel origin={meta.origin} />
         </div>
         <button onClick={onReset} className={ghost}>
           New audit

@@ -11,6 +11,10 @@ declare module '@/engine/worker/index.mjs' {
 
 declare module '@/engine/src/library.mjs' {
   export function library(root?: string): unknown;
+  /** Where this application keeps what it manages, per platform — and what
+   *  `SEO_AUDIT_HOME` overrides. The app's SQLite store sits beside the engine's
+   *  reports in here rather than inventing a second location. */
+  export function libraryRoot(env?: Record<string, string | undefined>, os?: string): string;
 }
 
 declare module '@/engine/src/options.mjs' {
