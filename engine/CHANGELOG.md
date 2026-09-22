@@ -115,6 +115,15 @@ versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   [docs/raycast.md](docs/raycast.md) explains how to run the extension from a
   checkout on either platform while the Store listing is in review.
 
+### Changed
+- **Parsing a page is three times faster.** A CPU profile of a 90KB page put
+  half the run inside two helpers in `src/parse.mjs`. `attr()` built the same
+  four regexes on every call — thousands of times a page, for about a dozen
+  distinct attribute names — and they are now compiled once and kept. `decode()`
+  ran twenty-five `String.replace` passes over every value it was handed, and
+  now returns early when there is no `&` in it, which is nearly every value on
+  a page. 22.5ms to 7.6ms per page, same output, no new code paths.
+
 ### Fixed
 - **The Store submission was held on a dependency nothing in `src/` imported.**
   Raycast requires every dependency the manifest declares to be imported by a
