@@ -24,6 +24,10 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
+import { siteKey } from './site-key.ts';
+
+export { siteKey };
+
 /** A repository linked to an audited site. */
 export type Repo = {
   id: number;
@@ -66,6 +70,13 @@ const SCHEMA = `
     created_at TEXT NOT NULL,
     UNIQUE (user_id, origin)
   );
+
+  CREATE TABLE IF NOT EXISTS github_accounts (
+    user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    login      TEXT NOT NULL,
+    token      TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
 `;
 
 // One connection per root, not per import. `next dev` re-evaluates a module on
@@ -91,21 +102,6 @@ export function openDb(root: string): DatabaseSync {
   return db;
 }
 
-/** The key a repository is linked under.
- *
- *  `meta.origin` arrives as whatever was typed into the audit form —
- *  `https://acme.com`, `https://acme.com/`, `HTTPS://Acme.com/pricing` — and a
- *  link made under one spelling has to be found by the others. Normalising in
- *  one exported function rather than at each call site is the whole of what
- *  keeps the read and the write agreeing about which row they mean. */
-export function siteKey(origin: string): string {
-  try {
-    return new URL(origin).origin.toLowerCase();
-  } catch {
-    return origin.trim().toLowerCase();
-  }
-}
-
 const toRepo = (row: Record<string, unknown>): Repo => ({
   id: Number(row.id),
   userId: Number(row.user_id),
@@ -120,6 +116,13 @@ const toRepo = (row: Record<string, unknown>): Repo => ({
 export function linkedRepo(db: DatabaseSync, userId: number, origin: string): Repo | null {
   const row = db.prepare('SELECT * FROM repos WHERE user_id = ? AND origin = ?').get(userId, siteKey(origin));
   return row ? toRepo(row) : null;
+}
+
+/** Every link the user has, keyed by site — what the page hands the report so
+ *  it can draw the panel without asking the server again. */
+export function linkedRepos(db: DatabaseSync, userId: number): Record<string, Repo> {
+  const rows = db.prepare('SELECT * FROM repos WHERE user_id = ?').all(userId).map(toRepo);
+  return Object.fromEntries(rows.map((repo) => [repo.origin, repo]));
 }
 
 /** Link a repository to `origin`, replacing whatever was linked before.
@@ -146,4 +149,26 @@ export function linkRepo(
 /** Forget the repository linked to `origin`. `false` when there was none. */
 export function unlinkRepo(db: DatabaseSync, userId: number, origin: string): boolean {
   return db.prepare('DELETE FROM repos WHERE user_id = ? AND origin = ?').run(userId, siteKey(origin)).changes > 0;
+}
+
+/** The GitHub account a user connected through the OAuth popup.
+ *
+ *  ponytail: the token sits in plain text in app.db, beside the reports — same
+ *  trust as the machine it runs on. Encrypt at rest the day this is hosted. */
+export type GithubAccount = { login: string; token: string };
+
+export function githubAccount(db: DatabaseSync, userId: number): GithubAccount | null {
+  const row = db.prepare('SELECT login, token FROM github_accounts WHERE user_id = ?').get(userId);
+  return row ? { login: String(row.login), token: String(row.token) } : null;
+}
+
+export function saveGithubAccount(db: DatabaseSync, userId: number, account: GithubAccount): void {
+  db.prepare(
+    `INSERT INTO github_accounts (user_id, login, token, created_at) VALUES (?, ?, ?, ?)
+     ON CONFLICT (user_id) DO UPDATE SET login = excluded.login, token = excluded.token`,
+  ).run(userId, account.login, account.token, new Date().toISOString());
+}
+
+export function forgetGithubAccount(db: DatabaseSync, userId: number): void {
+  db.prepare('DELETE FROM github_accounts WHERE user_id = ?').run(userId);
 }

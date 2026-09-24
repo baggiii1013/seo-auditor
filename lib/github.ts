@@ -47,6 +47,36 @@ const LOOK_FOR = ['robots.txt', 'sitemap.xml', 'llms.txt'];
  *  its web root, without this file having to know all of them. */
 const WEB_ROOT_DEPTH = 1;
 
+/** Source files that make one of the tracked files at build or request time,
+ *  so a repository with one *has* the file even though no path in the tree is
+ *  called `robots.txt`. Anchored at the repository root, or one app down in a
+ *  monorepo (`apps/web/…`, `packages/site/…`).
+ *
+ *  ponytail: file names only — anything switched on in a config file
+ *  (`@astrojs/sitemap`, `@nuxtjs/sitemap`, gatsby-plugin-sitemap, Hugo's
+ *  built-in sitemap) needs the config read, and reads as missing until then. */
+const CODE = '(js|jsx|ts|tsx|mjs|cjs)';
+
+function generators(name: string): RegExp {
+  const file = name.replace('.', '\\.');
+  const [stem, ext] = name.split('.');
+  const shapes = [
+    `(src/)?app/${file}/route\\.${CODE}`, // Next.js route handler
+    `(src/)?pages/${file}\\.${CODE}`, // Next.js pages router, Astro endpoint
+    `src/routes/${file}/\\+server\\.${CODE}`, // SvelteKit
+    `app/routes/(${stem}\\[\\.\\]${ext}|\\[${file}\\])\\.${CODE}`, // Remix, React Router
+    `server/routes/${file}\\.${CODE}`, // Nuxt, Nitro
+    `layouts/(_default/)?${file}`, // Hugo template
+  ];
+  // Next.js metadata routes exist for these two and not for llms.txt.
+  if (name !== 'llms.txt') shapes.push(`(src/)?app/${stem}\\.${CODE}`);
+  // next-sitemap always writes a sitemap; its robots.txt is opt-in, so no.
+  if (name === 'sitemap.xml') shapes.push(`next-sitemap\\.config\\.${CODE}`);
+  return new RegExp(`^((apps|packages)/[^/]+/)?(${shapes.join('|')})$`);
+}
+
+const GENERATED = Object.fromEntries(LOOK_FOR.map((name) => [name, generators(name)]));
+
 const API = 'https://api.github.com';
 
 /** `owner` and `name` are interpolated into an API path, so this is the trust
@@ -82,29 +112,34 @@ export function parseRepo(input: string): { owner: string; name: string } | null
 
 /** A token is optional and never required for a public repository. Without one
  *  GitHub allows sixty requests an hour per IP and cannot see a private repo;
- *  with one, five thousand. Read scope is all this file can use. */
-function headers(): Record<string, string> {
+ *  with one, five thousand. Read scope is all this file can use.
+ *
+ *  The connected account's OAuth token wins; `GITHUB_TOKEN` is the fallback for
+ *  an operator who would rather paste a personal access token than register an
+ *  OAuth app. */
+export const envToken = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null;
+
+function headers(token: string | null): Record<string, string> {
   const base: Record<string, string> = {
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
     'user-agent': 'seo-auditor',
   };
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   if (token) base.authorization = `Bearer ${token}`;
   return base;
 }
 
-const get = (path: string) => fetch(`${API}${path}`, { headers: headers(), cache: 'no-store' });
+const get = (path: string, token: string | null) =>
+  fetch(`${API}${path}`, { headers: headers(token), cache: 'no-store' });
 
 /** The rate-limit message, with the reset time GitHub sends and the way out. */
-function throttled(res: Response): string {
+function throttled(res: Response, token: string | null): string {
   const reset = Number(res.headers.get('x-ratelimit-reset'));
   const when = Number.isFinite(reset) && reset > 0 ? new Date(reset * 1000).toLocaleTimeString() : null;
-  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
   return [
     'GitHub is rate-limiting this address',
     when ? ` until ${when}` : '',
-    token ? '.' : ' — set GITHUB_TOKEN to raise the limit from 60 requests an hour to 5,000.',
+    token ? '.' : ' — connect GitHub to raise the limit from 60 requests an hour to 5,000.',
   ].join('');
 }
 
@@ -120,31 +155,38 @@ const CACHE_MS = 60_000;
 const cache = new Map<string, { at: number; look: Look }>();
 
 /** What the linked repository looks like right now. */
-export async function look(owner: string, name: string, branch: string | null): Promise<Look> {
+export async function look(
+  owner: string,
+  name: string,
+  branch: string | null,
+  token: string | null,
+): Promise<Look> {
   if (!namePart(owner) || !namePart(name)) {
     return { ok: false, reason: `${owner}/${name} is not a repository name.` };
   }
 
-  const key = `${owner}/${name}@${branch ?? ''}`;
+  // The token is in the key: a look taken before connecting cannot see the
+  // private repository a look taken after it can.
+  const key = `${owner}/${name}@${branch ?? ''}#${token ?? ''}`;
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.look;
 
-  const look = await read(owner, name, branch);
+  const look = await read(owner, name, branch, token);
   cache.set(key, { at: Date.now(), look });
   return look;
 }
 
-async function read(owner: string, name: string, branch: string | null): Promise<Look> {
+async function read(owner: string, name: string, branch: string | null, token: string | null): Promise<Look> {
   let repo: { default_branch?: string; private?: boolean; html_url?: string };
   try {
-    const res = await get(`/repos/${owner}/${name}`);
+    const res = await get(`/repos/${owner}/${name}`, token);
     if (res.status === 404) {
       return {
         ok: false,
-        reason: `No repository at ${owner}/${name} — or it is private, and no GITHUB_TOKEN is set for this app to read it with.`,
+        reason: `No repository at ${owner}/${name} — or it is private, and the connected GitHub account cannot read it.`,
       };
     }
-    if (res.status === 403 || res.status === 429) return { ok: false, reason: throttled(res) };
+    if (res.status === 403 || res.status === 429) return { ok: false, reason: throttled(res, token) };
     if (!res.ok) return { ok: false, reason: `GitHub answered ${res.status} for ${owner}/${name}.` };
     repo = await res.json();
   } catch (err) {
@@ -154,8 +196,8 @@ async function read(owner: string, name: string, branch: string | null): Promise
   const ref = branch || repo.default_branch || 'main';
 
   const [commitRes, treeRes] = await Promise.all([
-    get(`/repos/${owner}/${name}/commits?sha=${encodeURIComponent(ref)}&per_page=1`).catch(() => null),
-    get(`/repos/${owner}/${name}/git/trees/${encodeURIComponent(ref)}?recursive=1`).catch(() => null),
+    get(`/repos/${owner}/${name}/commits?sha=${encodeURIComponent(ref)}&per_page=1`, token).catch(() => null),
+    get(`/repos/${owner}/${name}/git/trees/${encodeURIComponent(ref)}?recursive=1`, token).catch(() => null),
   ]);
 
   return {
@@ -167,7 +209,7 @@ async function read(owner: string, name: string, branch: string | null): Promise
       url: repo.html_url ?? `https://github.com/${owner}/${name}`,
       private: Boolean(repo.private),
       commit: await lastCommit(commitRes),
-      files: await tracked(treeRes, ref),
+      files: await tracked(treeRes, ref, token),
     },
   };
 }
@@ -191,11 +233,11 @@ async function lastCommit(res: Response | null): Promise<RepoLook['commit']> {
   }
 }
 
-async function tracked(res: Response | null, ref: string): Promise<TrackedFile[]> {
+async function tracked(res: Response | null, ref: string, token: string | null): Promise<TrackedFile[]> {
   const cannotTell = (why: string) => LOOK_FOR.map((name) => ({ name, state: 'unknown' as const, why }));
 
   if (!res) return cannotTell('the repository tree could not be fetched');
-  if (res.status === 403 || res.status === 429) return cannotTell(throttled(res).toLowerCase());
+  if (res.status === 403 || res.status === 429) return cannotTell(throttled(res, token).toLowerCase());
   if (!res.ok) return cannotTell(`GitHub answered ${res.status} for the ${ref} tree`);
 
   let tree: { tree?: { path?: string; type?: string }[]; truncated?: boolean };
@@ -234,6 +276,9 @@ export function classify(paths: string[], truncated: boolean): TrackedFile[] {
     const shallow = hits.find((path) => path.split('/').length <= WEB_ROOT_DEPTH + 1);
     if (shallow) return { name, state: 'present' as const, path: shallow };
 
+    const generator = paths.find((path) => GENERATED[name].test(path.toLowerCase()));
+    if (generator) return { name, state: 'present' as const, path: generator };
+
     // A deeper hit is still not nothing. It is not a claim that the site serves
     // this file, and it is not a claim that the file is absent either — which
     // is what the third state is for.
@@ -256,4 +301,41 @@ export function classify(paths: string[], truncated: boolean): TrackedFile[] {
     }
     return { name, state: 'missing' as const };
   });
+}
+
+/** A repository in the import list. */
+export type RepoChoice = { fullName: string; private: boolean; pushedAt: string; defaultBranch: string };
+
+/** Every repository the token can see — personal, collaborator and org — most
+ *  recently pushed first, which is the order Vercel's import list uses and the
+ *  order in which the repo you want is nearly always on top. */
+export async function listRepos(token: string): Promise<{ ok: true; repos: RepoChoice[] } | { ok: false; reason: string }> {
+  const repos: RepoChoice[] = [];
+  // ponytail: stops at 300 (three pages). Enough for a picker with a search box;
+  // follow the Link header to the end if someone has more and misses one.
+  for (let page = 1; page <= 3; page++) {
+    let res: Response;
+    try {
+      res = await get(`/user/repos?per_page=100&sort=pushed&page=${page}`, token);
+    } catch (err) {
+      return { ok: false, reason: `Could not reach GitHub: ${(err as Error).message}` };
+    }
+    if (res.status === 401) return { ok: false, reason: 'GitHub rejected the token — connect again.' };
+    if (res.status === 403 || res.status === 429) return { ok: false, reason: throttled(res, token) };
+    if (!res.ok) return { ok: false, reason: `GitHub answered ${res.status} listing repositories.` };
+    const rows: { full_name: string; private: boolean; pushed_at: string; default_branch: string }[] = await res.json();
+    for (const r of rows) {
+      repos.push({ fullName: r.full_name, private: r.private, pushedAt: r.pushed_at, defaultBranch: r.default_branch });
+    }
+    if (rows.length < 100) break;
+  }
+  return { ok: true, repos };
+}
+
+/** The login a token belongs to — what the panel shows as "connected as". */
+export async function whoami(token: string): Promise<string | null> {
+  const res = await get('/user', token).catch(() => null);
+  if (!res?.ok) return null;
+  const user = await res.json().catch(() => null);
+  return typeof user?.login === 'string' ? user.login : null;
 }

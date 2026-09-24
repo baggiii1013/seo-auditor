@@ -1,5 +1,8 @@
 import { formFields, notInApp } from "@/engine/src/options.mjs";
 import { BROWSER_NAMES, OS_NAMES } from "@/engine/src/agents.mjs";
+import { connection } from "next/server";
+
+import { gitState } from "@/lib/git-state";
 
 import Auditor from "./auditor";
 
@@ -10,7 +13,11 @@ import Auditor from "./auditor";
 //
 // Every gate is open because this app is the person running it: see the comment
 // in app/api/engine/[...path]/route.ts.
-export default function Home() {
+export default async function Home() {
+  // Read at request time, not frozen into the build: who is connected to GitHub
+  // and which sites have a repository, so the report never has to ask.
+  await connection();
+  const git = gitState();
   const fields = formFields(() => true);
   const missing = notInApp();
 
@@ -30,7 +37,7 @@ export default function Home() {
         </p>
       </header>
 
-      <Auditor fields={fields} agents={{ browsers: BROWSER_NAMES, systems: OS_NAMES }} />
+      <Auditor fields={fields} agents={{ browsers: BROWSER_NAMES, systems: OS_NAMES }} git={git} />
 
       <details className="card mt-12 max-w-4xl p-5">
         {/* Stays at the measure it was written for even when the shell widens:

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import type { Field } from '@/engine/src/options.mjs';
+import type { GitState } from '@/lib/git-state';
 
 import ReportView from './report';
 import type { Report } from './types';
@@ -27,6 +28,11 @@ type Agents = { browsers: string[]; systems: string[] };
 
 const input =
   'w-full rounded-lg border border-line bg-white/[0.06] px-3 py-2 text-sm text-ink outline-none transition duration-150 ease-out placeholder:text-ink/50 focus:border-brand focus:ring-2 focus:ring-brand/15';
+
+// Firefox restores a button's disabled state across reloads, un-disabling these
+// before hydration. autocomplete=off opts them out; React's button types just
+// don't list it, hence the spread.
+const noRestore = { autoComplete: 'off' } as object;
 
 const ghost =
   'rounded-lg border border-line bg-white/[0.06] px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
@@ -232,7 +238,7 @@ function Crawl({
   );
 }
 
-export default function Auditor({ fields, agents }: { fields: Field[]; agents: Agents }) {
+export default function Auditor({ fields, agents, git }: { fields: Field[]; agents: Agents; git: GitState }) {
   const [url, setUrl] = useState('');
   const [values, setValues] = useState<Record<string, string>>({});
   const [advanced, setAdvanced] = useState(false);
@@ -320,7 +326,7 @@ export default function Auditor({ fields, agents }: { fields: Field[]; agents: A
     setRunning(false);
   };
 
-  if (report) return <ReportView report={report} onReset={() => setReport(null)} />;
+  if (report) return <ReportView report={report} git={git} onReset={() => setReport(null)} />;
 
   if (running || log.length > 0) {
     return (
@@ -360,10 +366,10 @@ export default function Auditor({ fields, agents }: { fields: Field[]; agents: A
             className={`${input} flex-1 sm:text-base`}
           />
           <div className="flex gap-2">
-            <button onClick={preview} disabled={!url || busy} className={ghost}>
+            <button onClick={preview} disabled={!url || busy} {...noRestore} className={ghost}>
               {previewing ? 'Looking…' : 'Preview'}
             </button>
-            <button onClick={run} disabled={!url || busy} className={solid}>
+            <button onClick={run} disabled={!url || busy} {...noRestore} className={solid}>
               Audit
             </button>
           </div>

@@ -1,5 +1,5 @@
-import { libraryRoot } from '@/engine/src/library.mjs';
-import { LOCAL_USER, linkRepo, linkedRepo, openDb, unlinkRepo } from '@/lib/db';
+import { LOCAL_USER, linkRepo, linkedRepo, unlinkRepo } from '@/lib/db';
+import { gitAuth, store } from '@/lib/git-state';
 import { look, parseRepo, type Look } from '@/lib/github';
 import type { Repo } from '@/lib/db';
 
@@ -8,33 +8,24 @@ import type { Repo } from '@/lib/db';
 // Read-only against GitHub. The one thing this route writes is the link itself,
 // and that lives in the app's own SQLite store — see lib/db.ts.
 //
-// `LOCAL_USER` is threaded through every call rather than assumed inside the
-// queries. There is one user today; the day there is a session, this is the
-// only line in the file that changes.
+// Only called once a repository is linked (or being linked): whether one is, and
+// who is connected, reaches the report with the page — see lib/git-state.ts.
 
 type Payload = { repo: Repo | null; look?: Look };
 
-const store = () => openDb(libraryRoot());
-
 const bad = (message: string, status = 400) => Response.json({ error: message }, { status });
-
-/** The link and the repository's current state, in one answer — the panel has
- *  nothing to draw with one and not the other, so a second round trip would
- *  only be a second chance to fail. */
-async function payload(origin: string): Promise<Payload> {
-  const repo = linkedRepo(store(), LOCAL_USER, origin);
-  if (!repo) return { repo: null };
-  return { repo, look: await look(repo.owner, repo.name, repo.branch) };
-}
 
 export async function GET(request: Request) {
   const origin = new URL(request.url).searchParams.get('origin');
   if (!origin) return bad('An `origin` is required.');
-  return Response.json(await payload(origin));
+  const repo = linkedRepo(store(), LOCAL_USER, origin);
+  if (!repo) return Response.json({ repo: null } satisfies Payload);
+  const seen = await look(repo.owner, repo.name, repo.branch, gitAuth().token);
+  return Response.json({ repo, look: seen } satisfies Payload);
 }
 
 export async function POST(request: Request) {
-  let body: { origin?: string; repo?: string; branch?: string };
+  let body: { origin?: string; repo?: string };
   try {
     body = await request.json();
   } catch {
@@ -45,23 +36,16 @@ export async function POST(request: Request) {
   if (!origin) return bad('An `origin` is required.');
 
   const parsed = parseRepo(body.repo ?? '');
-  if (!parsed) {
-    return bad('That is not a repository. Give it `owner/name`, or the URL from the address bar.');
-  }
-
-  // An empty branch box means the default branch, which is a fact about the
-  // repository and is resolved when it is read. Storing the string "" here
-  // would mean asking GitHub for a branch called nothing.
-  const branch = (body.branch ?? '').trim() || null;
+  if (!parsed) return bad('That is not a repository.');
 
   // Look before writing. A link to a repository that cannot be read is a line
   // in the report header claiming a connection there isn't one — and the reason
-  // that comes back is already the instruction for fixing it, whether that is a
-  // typo or a private repository with no GITHUB_TOKEN set.
-  const seen = await look(parsed.owner, parsed.name, branch);
+  // that comes back is already the instruction for fixing it. `null` branch:
+  // the default one, resolved at read time.
+  const seen = await look(parsed.owner, parsed.name, null, gitAuth().token);
   if (!seen.ok) return bad(seen.reason, 422);
 
-  const repo = linkRepo(store(), LOCAL_USER, origin, { ...parsed, branch });
+  const repo = linkRepo(store(), LOCAL_USER, origin, { ...parsed, branch: null });
   return Response.json({ repo, look: seen } satisfies Payload);
 }
 

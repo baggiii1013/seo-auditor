@@ -14,7 +14,18 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 
-import { LOCAL_USER, linkRepo, linkedRepo, openDb, siteKey, unlinkRepo } from './db.ts';
+import {
+  LOCAL_USER,
+  forgetGithubAccount,
+  githubAccount,
+  linkRepo,
+  linkedRepo,
+  linkedRepos,
+  openDb,
+  saveGithubAccount,
+  siteKey,
+  unlinkRepo,
+} from './db.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'seo-auditor-db-'));
 const db = openDb(root);
@@ -82,4 +93,18 @@ test('unlinking reports whether there was anything to unlink', () => {
   assert.equal(unlinkRepo(db, LOCAL_USER, 'https://acme.com'), true);
   assert.equal(unlinkRepo(db, LOCAL_USER, 'https://acme.com'), false);
   assert.equal(linkedRepo(db, LOCAL_USER, 'https://acme.com'), null);
+});
+
+test('linkedRepos is keyed the way the report looks it up', () => {
+  linkRepo(db, LOCAL_USER, 'HTTPS://Keyed.example/pricing', { owner: 'a', name: 'b' });
+  assert.equal(linkedRepos(db, LOCAL_USER)[siteKey('https://keyed.example/')]?.name, 'b');
+});
+
+test('a GitHub account is saved once, replaced on reconnect, and forgotten', () => {
+  assert.equal(githubAccount(db, LOCAL_USER), null);
+  saveGithubAccount(db, LOCAL_USER, { login: 'one', token: 't1' });
+  saveGithubAccount(db, LOCAL_USER, { login: 'two', token: 't2' });
+  assert.deepEqual(githubAccount(db, LOCAL_USER), { login: 'two', token: 't2' });
+  forgetGithubAccount(db, LOCAL_USER);
+  assert.equal(githubAccount(db, LOCAL_USER), null);
 });

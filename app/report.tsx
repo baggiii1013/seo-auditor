@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 
 import AiPanel from './ai-panel';
 import GitPanel from './git-panel';
+import type { GitState } from '@/lib/git-state';
 import { LEVELS, type Cause, type CheckRow, type Level, type Report, type Score } from './types';
 import {
   bandOf,
@@ -400,7 +401,7 @@ function CauseCard({ cause }: { cause: Cause }) {
   );
 }
 
-export default function ReportView({ report, onReset }: { report: Report; onReset: () => void }) {
+export default function ReportView({ report, git, onReset }: { report: Report; git: GitState; onReset: () => void }) {
   const { meta, causes } = report;
 
   // A run that reached nothing comes back with no `score` key at all — not a
@@ -486,7 +487,7 @@ export default function ReportView({ report, onReset }: { report: Report; onRese
           {/* Context for the numbers below rather than a finding among them,
               so it goes in the header beside the crawl summary and not into
               the masonry. */}
-          <GitPanel origin={meta.origin} />
+          <GitPanel origin={meta.origin} git={git} />
         </div>
         <button onClick={onReset} className={ghost}>
           New audit

@@ -94,3 +94,42 @@ test('parseRepo refuses anything that would not be a repository path', () => {
     assert.equal(parseRepo(input), null, input);
   }
 });
+
+test('a Next.js metadata route counts as the file it generates', () => {
+  // baggiii1013/kaustubh-bagale: no robots.txt or sitemap.xml in the tree, but
+  // the site serves both from these.
+  const files = classify(['src/app/robots.ts', 'src/app/sitemap.ts', 'public/llms.txt'], false);
+  assert.equal(of(files, 'robots.txt').state, 'present');
+  assert.equal(of(files, 'robots.txt').path, 'src/app/robots.ts');
+  assert.equal(of(files, 'sitemap.xml').path, 'src/app/sitemap.ts');
+  assert.equal(of(files, 'llms.txt').path, 'public/llms.txt');
+
+  // A robots.ts that is not a metadata route is not one.
+  assert.equal(of(classify(['src/lib/robots.ts'], false), 'robots.txt').state, 'missing');
+});
+
+test('every framework that generates these files is recognised', () => {
+  const cases: [string, string][] = [
+    ['app/robots.txt/route.ts', 'robots.txt'], // Next.js route handler
+    ['src/app/llms.txt/route.ts', 'llms.txt'],
+    ['pages/sitemap.xml.js', 'sitemap.xml'], // Next.js pages router
+    ['src/pages/robots.txt.ts', 'robots.txt'], // Astro
+    ['src/routes/sitemap.xml/+server.ts', 'sitemap.xml'], // SvelteKit
+    ['src/routes/llms.txt/+server.js', 'llms.txt'],
+    ['app/routes/robots[.]txt.tsx', 'robots.txt'], // Remix / React Router
+    ['app/routes/[sitemap.xml].ts', 'sitemap.xml'],
+    ['server/routes/robots.txt.ts', 'robots.txt'], // Nuxt
+    ['layouts/_default/sitemap.xml', 'sitemap.xml'], // Hugo
+    ['next-sitemap.config.js', 'sitemap.xml'],
+    ['apps/web/src/app/sitemap.ts', 'sitemap.xml'], // monorepo
+  ];
+  for (const [path, name] of cases) {
+    const file = of(classify([path], false), name);
+    assert.equal(file.state, 'present', path);
+    assert.equal(file.path, path);
+  }
+
+  // No such thing as a Next.js llms metadata route, and one level too deep for a monorepo.
+  assert.equal(of(classify(['app/llms.ts'], false), 'llms.txt').state, 'missing');
+  assert.equal(of(classify(['a/b/c/app/robots.ts'], false), 'robots.txt').state, 'missing');
+});
