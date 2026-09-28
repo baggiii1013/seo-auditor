@@ -1,5 +1,5 @@
-// The vendored engine is plain ESM JavaScript. These are the only four modules
-// we reach into; everything else is reached over HTTP through the worker.
+// The vendored engine is plain ESM JavaScript. These are the only modules we
+// reach into; everything else goes through the worker — see lib/engine.ts.
 
 declare module '@/engine/worker/index.mjs' {
   export function handle(
@@ -7,6 +7,8 @@ declare module '@/engine/worker/index.mjs' {
     env: Record<string, unknown>,
     ctx: unknown,
   ): Promise<Response>;
+  /** The URL a run would audit, or why it will not. */
+  export function targetFor(input: unknown, env: Record<string, unknown>): { url: string; error?: undefined } | { error: string };
 }
 
 declare module '@/engine/src/library.mjs' {
@@ -40,4 +42,9 @@ declare module '@/engine/src/options.mjs' {
 declare module '@/engine/src/agents.mjs' {
   export const BROWSER_NAMES: string[];
   export const OS_NAMES: string[];
+}
+
+declare module '@/engine/src/http.mjs' {
+  /** Every fetch a crawl makes asks `fn` first; a string back refuses it. */
+  export function guardFetches(fn: (url: string) => Promise<string | null>): void;
 }

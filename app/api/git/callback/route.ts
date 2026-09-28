@@ -1,15 +1,16 @@
-import { LOCAL_USER, saveGithubAccount } from '@/lib/db';
-import { store } from '@/lib/git-state';
+import { createSession, saveGithubAccount, sessionCookie, userForGithub } from '@/lib/db';
 import { whoami } from '@/lib/github';
 import { exchangeCode } from '@/lib/github-app';
+import { store } from '@/lib/store';
 
 // Where GitHub sends the popup back to. Swap the code for a token, keep it, and
 // tell the report that opened the popup — which is still on screen, holding an
 // audit that only lives in its memory, which is why this is a popup and not a
 // redirect of the page itself.
 
-/** A page that tells the opener how it went and closes itself. */
-function done(message: string, ok: boolean) {
+/** A page that tells the opener how it went and closes itself — and, on
+ *  success, hands this browser its session cookie. */
+function done(message: string, ok: boolean, cookie?: string) {
   // On success `message` is the login, which the panel shows as "connected as".
   const payload = JSON.stringify({ type: 'github-connect', ok, message }).replace(/</g, '\\u003c');
   return new Response(
@@ -18,7 +19,11 @@ function done(message: string, ok: boolean) {
 <script>window.opener?.postMessage(${payload}, location.origin); ${ok ? 'window.close();' : ''}</script>`,
     {
       status: ok ? 200 : 400,
-      headers: { 'content-type': 'text/html; charset=utf-8', 'set-cookie': 'gh_oauth_state=; Path=/api/git; Max-Age=0' },
+      headers: [
+        ['content-type', 'text/html; charset=utf-8'],
+        ['set-cookie', 'gh_oauth_state=; Path=/api/git; Max-Age=0'],
+        ...(cookie ? [['set-cookie', cookie] as [string, string]] : []),
+      ],
     },
   );
 }
@@ -46,9 +51,11 @@ export async function GET(request: Request) {
   const got = await exchangeCode(code);
   if ('error' in got) return done(got.error, false);
 
-  const login = await whoami(got.token);
-  if (!login) return done('Got a token, but GitHub would not say whose it is.', false);
+  const who = await whoami(got.token);
+  if (!who) return done('Got a token, but GitHub would not say whose it is.', false);
 
-  saveGithubAccount(store(), LOCAL_USER, { login, ...got });
-  return done(login, true);
+  const db = store();
+  const user = userForGithub(db, who.id, who.login);
+  saveGithubAccount(db, user, { login: who.login, ...got });
+  return done(who.login, true, sessionCookie(request, createSession(db, user)));
 }

@@ -15,11 +15,11 @@
 //      temp folder, which means it cannot be tested without writing to the
 //      operator's actual library.
 //
-// Every query takes a `userId`. There is no sign-in yet and `users` holds
-// exactly one row — but queries written without one all have to be found and
-// rewritten the day sign-in lands, and threading an argument nobody varies
-// costs nothing today.
+// Nobody signs in to audit. A user row exists only once someone continues with
+// GitHub to link a repository, keyed by their GitHub id, and a browser holds
+// only a random session id that points at it — tokens never leave the server.
 
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -47,13 +47,6 @@ export type Repo = {
   createdAt: string;
 };
 
-/** The one user there is.
- *
- *  Sign-in will put real rows in this table; until then this id is what every
- *  query is scoped by, so nothing above this file has to know which of the two
- *  worlds it is running in. */
-export const LOCAL_USER = 1;
-
 const SCHEMA = `
   PRAGMA journal_mode = WAL;
   PRAGMA foreign_keys = ON;
@@ -61,7 +54,28 @@ const SCHEMA = `
   CREATE TABLE IF NOT EXISTS users (
     id         INTEGER PRIMARY KEY,
     name       TEXT NOT NULL,
+    github_id  INTEGER,
     created_at TEXT NOT NULL
+  );
+
+  -- The id is a hash of the cookie, so a copy of this file opens no browser's
+  -- session.
+  CREATE TABLE IF NOT EXISTS sessions (
+    id         TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    expires_at TEXT NOT NULL
+  );
+
+  -- One crawl. Nobody owns it: the id is random, and whoever holds it can read it.
+  CREATE TABLE IF NOT EXISTS audits (
+    id          TEXT PRIMARY KEY,
+    url         TEXT NOT NULL,
+    params      TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    result      TEXT,
+    error       TEXT,
+    created_at  TEXT NOT NULL,
+    finished_at TEXT
   );
 
   CREATE TABLE IF NOT EXISTS repos (
@@ -94,6 +108,8 @@ function migrate(db: DatabaseSync): void {
     db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
 
   if (!has('repos', 'installation_id')) db.exec('ALTER TABLE repos ADD COLUMN installation_id INTEGER');
+  if (!has('users', 'github_id')) db.exec('ALTER TABLE users ADD COLUMN github_id INTEGER');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_github_id ON users (github_id)');
 
   // A token from the OAuth app the GitHub App replaced cannot do anything the
   // app's can, so the row is dropped rather than carried: connect once more.
@@ -117,11 +133,6 @@ export function openDb(root: string): DatabaseSync {
   const db = new DatabaseSync(join(root, 'app.db'));
   db.exec(SCHEMA);
   migrate(db);
-  db.prepare('INSERT INTO users (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(
-    LOCAL_USER,
-    'local',
-    new Date().toISOString(),
-  );
 
   connections.set(root, db);
   return db;
@@ -225,4 +236,117 @@ export function saveGithubAccount(db: DatabaseSync, userId: number, account: Git
 
 export function forgetGithubAccount(db: DatabaseSync, userId: number): void {
   db.prepare('DELETE FROM github_accounts WHERE user_id = ?').run(userId);
+}
+
+/** The user behind a GitHub account, made on their first sign-in. Keyed by
+ *  GitHub's numeric id, which survives a renamed login. */
+export function userForGithub(db: DatabaseSync, githubId: number, login: string): number {
+  db.prepare(
+    `INSERT INTO users (name, github_id, created_at) VALUES (?, ?, ?)
+     ON CONFLICT (github_id) DO UPDATE SET name = excluded.name`,
+  ).run(login, githubId, new Date().toISOString());
+  return Number(db.prepare('SELECT id FROM users WHERE github_id = ?').get(githubId)!.id);
+}
+
+const SESSION_DAYS = 30;
+const hashed = (token: string) => createHash('sha256').update(token).digest('hex');
+
+/** A new session for `userId`. The return value goes in the browser's cookie
+ *  and nowhere else — only its hash is kept. */
+export function createSession(db: DatabaseSync, userId: number, now = Date.now()): string {
+  db.prepare('DELETE FROM sessions WHERE expires_at < ?').run(new Date(now).toISOString());
+  const token = randomBytes(32).toString('base64url');
+  const expires = new Date(now + SESSION_DAYS * 86_400_000).toISOString();
+  db.prepare('INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)').run(hashed(token), userId, expires);
+  return token;
+}
+
+export const SESSION_COOKIE = 'sid';
+
+/** The cookie that keeps a browser signed in. HttpOnly, so no script on the
+ *  page can read it. Secure when the request arrived over HTTPS — asked of the
+ *  request, not of NODE_ENV: `next start` on http://localhost is production,
+ *  and Firefox silently drops a Secure cookie sent over plain http. */
+export function sessionCookie(request: Request, token: string, maxAge = SESSION_DAYS * 86_400): string {
+  const https =
+    (request.headers.get('x-forwarded-proto') ?? new URL(request.url).protocol.replace(':', '')) === 'https';
+  return `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${https ? '; Secure' : ''}`;
+}
+
+/** Whose cookie this is, or `null` for a stranger, a forgery or an old one. */
+export function sessionUser(db: DatabaseSync, token: string, now = Date.now()): number | null {
+  const row = db.prepare('SELECT user_id, expires_at FROM sessions WHERE id = ?').get(hashed(token));
+  if (!row || String(row.expires_at) < new Date(now).toISOString()) return null;
+  return Number(row.user_id);
+}
+
+export function endSession(db: DatabaseSync, token: string): void {
+  db.prepare('DELETE FROM sessions WHERE id = ?').run(hashed(token));
+}
+
+export type AuditStatus = 'queued' | 'running' | 'done' | 'failed';
+
+export type Audit = {
+  id: string;
+  url: string;
+  /** The query string the run was asked with — everything needed to start it. */
+  params: string;
+  status: AuditStatus;
+  /** The finished report, as JSON. */
+  result: string | null;
+  error: string | null;
+  createdAt: string;
+};
+
+/** How long a finished report stays fetchable. */
+const KEEP_DAYS = 7;
+
+export function createAudit(db: DatabaseSync, audit: { id: string; url: string; params: string }, now = Date.now()): void {
+  const cutoff = new Date(now - KEEP_DAYS * 86_400_000).toISOString();
+  db.prepare('DELETE FROM audits WHERE created_at < ?').run(cutoff);
+  db.prepare('INSERT INTO audits (id, url, params, status, created_at) VALUES (?, ?, ?, ?, ?)').run(
+    audit.id,
+    audit.url,
+    audit.params,
+    'queued',
+    new Date(now).toISOString(),
+  );
+}
+
+export function startAudit(db: DatabaseSync, id: string): void {
+  db.prepare("UPDATE audits SET status = 'running' WHERE id = ?").run(id);
+}
+
+export function finishAudit(db: DatabaseSync, id: string, outcome: { result: string } | { error: string }): void {
+  db.prepare('UPDATE audits SET status = ?, result = ?, error = ?, finished_at = ? WHERE id = ?').run(
+    'result' in outcome ? 'done' : 'failed',
+    'result' in outcome ? outcome.result : null,
+    'error' in outcome ? outcome.error : null,
+    new Date().toISOString(),
+    id,
+  );
+}
+
+export function getAudit(db: DatabaseSync, id: string): Audit | null {
+  const row = db.prepare('SELECT * FROM audits WHERE id = ?').get(id);
+  if (!row) return null;
+  return {
+    id: String(row.id),
+    url: String(row.url),
+    params: String(row.params),
+    status: String(row.status) as AuditStatus,
+    result: row.result == null ? null : String(row.result),
+    error: row.error == null ? null : String(row.error),
+    createdAt: String(row.created_at),
+  };
+}
+
+/** Runs a previous process started and never finished. The queue lives in
+ *  memory, so after a restart nothing will ever pick these up again. */
+export function abandonAudits(db: DatabaseSync, reason: string): number {
+  return Number(
+    db
+      .prepare("UPDATE audits SET status = 'failed', error = ?, finished_at = ? WHERE status IN ('queued', 'running')")
+      .run(reason, new Date().toISOString()).changes,
+  );
 }

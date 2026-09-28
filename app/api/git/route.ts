@@ -1,6 +1,7 @@
-import { LOCAL_USER, linkRepo, linkedRepo, unlinkRepo } from '@/lib/db';
+import { linkRepo, linkedRepo, unlinkRepo } from '@/lib/db';
 import { installationFor } from '@/lib/github-app';
-import { store, tokenFor, userToken } from '@/lib/git-state';
+import { currentUser, tokenFor, userToken } from '@/lib/git-state';
+import { store } from '@/lib/store';
 import { look, parseRepo, type Look } from '@/lib/github';
 import type { Repo } from '@/lib/db';
 
@@ -11,6 +12,8 @@ import type { Repo } from '@/lib/db';
 //
 // Only called once a repository is linked (or being linked): whether one is, and
 // who is connected, reaches the report with the page — see lib/git-state.ts.
+// Links belong to whoever this browser's session says it is; a visitor who
+// never continued with GitHub has none.
 
 type Payload = { repo: Repo | null; look?: Look };
 
@@ -19,7 +22,8 @@ const bad = (message: string, status = 400) => Response.json({ error: message },
 export async function GET(request: Request) {
   const origin = new URL(request.url).searchParams.get('origin');
   if (!origin) return bad('An `origin` is required.');
-  const repo = linkedRepo(store(), LOCAL_USER, origin);
+  const user = await currentUser();
+  const repo = user && linkedRepo(store(), user, origin);
   if (!repo) return Response.json({ repo: null } satisfies Payload);
   const { token, lost } = await tokenFor(repo);
   const seen: Look = lost
@@ -45,8 +49,9 @@ export async function POST(request: Request) {
   const parsed = parseRepo(body.repo ?? '');
   if (!parsed) return bad('That is not a repository.');
 
-  const user = await userToken();
-  if (!user) return bad('Continue with GitHub first.', 401);
+  const userId = await currentUser();
+  const user = userId && (await userToken(userId));
+  if (!userId || !user) return bad('Continue with GitHub first.', 401);
 
   // Look before writing, and look *as the user*: a user token only reaches
   // repositories that person can see and the app is installed on, so a
@@ -61,13 +66,15 @@ export async function POST(request: Request) {
     return bad(`The GitHub App is not installed on ${parsed.owner}/${parsed.name}. Adjust its permissions to add it.`, 422);
   }
 
-  const repo = linkRepo(store(), LOCAL_USER, origin, { ...parsed, branch: null, installationId });
+  const repo = linkRepo(store(), userId, origin, { ...parsed, branch: null, installationId });
   return Response.json({ repo, look: seen } satisfies Payload);
 }
 
 export async function DELETE(request: Request) {
   const origin = new URL(request.url).searchParams.get('origin');
   if (!origin) return bad('An `origin` is required.');
-  unlinkRepo(store(), LOCAL_USER, origin);
+  const user = await currentUser();
+  if (!user) return bad('Continue with GitHub first.', 401);
+  unlinkRepo(store(), user, origin);
   return Response.json({ repo: null } satisfies Payload);
 }

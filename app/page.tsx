@@ -2,6 +2,7 @@ import { formFields, notInApp } from "@/engine/src/options.mjs";
 import { BROWSER_NAMES, OS_NAMES } from "@/engine/src/agents.mjs";
 import { connection } from "next/server";
 
+import { allowed } from "@/lib/engine";
 import { gitState } from "@/lib/git-state";
 
 import Auditor from "./auditor";
@@ -11,14 +12,14 @@ import Auditor from "./auditor";
 // client could build its own controls instead of drifting a second copy. Adding
 // a flag upstream adds the control here.
 //
-// Every gate is open because this app is the person running it: see the comment
-// in app/api/engine/[...path]/route.ts.
+// Gated controls — PageSpeed, Search Console, other hosts — are drawn only when
+// the operator switched them on; see lib/engine.ts.
 export default async function Home() {
   // Read at request time, not frozen into the build: who is connected to GitHub
   // and which sites have a repository, so the report never has to ask.
   await connection();
-  const git = gitState();
-  const fields = formFields(() => true);
+  const git = await gitState();
+  const fields = formFields(allowed);
   const missing = notInApp();
 
   return (
@@ -60,8 +61,7 @@ export default async function Home() {
       </details>
 
       <footer className="mt-10 text-xs leading-relaxed text-page-ink/70">
-        — see engine/UPSTREAM.txt. Runs are kept on this machine; list them with{" "}
-        <code className="font-mono">seo-audit --reports</code>.
+        — see engine/UPSTREAM.txt. Reports are kept on the server for a week, then deleted.
       </footer>
     </main>
   );

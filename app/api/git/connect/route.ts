@@ -1,6 +1,9 @@
-import { LOCAL_USER, forgetGithubAccount, githubAccount } from '@/lib/db';
+import { cookies } from 'next/headers';
+
+import { SESSION_COOKIE, endSession, forgetGithubAccount, githubAccount, sessionCookie } from '@/lib/db';
 import { appConfigured, authorizeUrl, installUrl, revokeUserToken } from '@/lib/github-app';
-import { store } from '@/lib/git-state';
+import { currentUser } from '@/lib/git-state';
+import { store } from '@/lib/store';
 
 // Start a GitHub popup: sign in (`/api/git/connect`), or GitHub's own install
 // screen (`?install`), which picks an account and the repositories the app may
@@ -31,10 +34,14 @@ export async function GET(request: Request) {
   });
 }
 
-/** Sign out. Links stay, and keep reading through their installation. */
-export async function DELETE() {
-  const saved = githubAccount(store(), LOCAL_USER);
-  forgetGithubAccount(store(), LOCAL_USER);
+/** Sign out: this browser's session ends and the GitHub grant is revoked.
+ *  Links stay, for the next time this person continues with GitHub. */
+export async function DELETE(request: Request) {
+  const user = await currentUser();
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (token) endSession(store(), token);
+  const saved = user ? githubAccount(store(), user) : null;
+  if (user) forgetGithubAccount(store(), user);
   if (saved) await revokeUserToken(saved.token);
-  return Response.json({ ok: true });
+  return Response.json({ ok: true }, { headers: { 'set-cookie': sessionCookie(request, '', 0) } });
 }

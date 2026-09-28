@@ -123,6 +123,8 @@ export type Meta = {
 };
 
 export type Report = {
+  /** The server's id for this run — what exports are fetched by. */
+  id: string;
   meta: Meta;
   findings: Finding[];
   causes: Cause[];

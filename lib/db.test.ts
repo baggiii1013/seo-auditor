@@ -16,16 +16,25 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
 
 import {
-  LOCAL_USER,
+  abandonAudits,
+  createAudit,
+  createSession,
+  endSession,
+  finishAudit,
   forgetGithubAccount,
+  getAudit,
   githubAccount,
   linkRepo,
   linkedRepo,
   linkedRepos,
   openDb,
   saveGithubAccount,
+  sessionCookie,
+  sessionUser,
   siteKey,
+  startAudit,
   unlinkRepo,
+  userForGithub,
 } from './db.ts';
 
 const root = mkdtempSync(join(tmpdir(), 'seo-auditor-db-'));
@@ -33,36 +42,75 @@ const db = openDb(root);
 
 after(() => rmSync(root, { recursive: true, force: true }));
 
-test('the one local user is seeded, once', () => {
-  const rows = db.prepare('SELECT id, name FROM users').all();
-  assert.equal(rows.length, 1);
-  assert.equal(Number(rows[0].id), LOCAL_USER);
+const USER = userForGithub(db, 101, 'someone');
 
-  // Opening again must not seed a second one — `next dev` re-evaluates the
-  // module on every edit and each evaluation calls through here.
-  openDb(root);
-  assert.equal(db.prepare('SELECT count(*) AS n FROM users').get()!.n, 1);
+test('a user is made once per GitHub account, and follows a renamed login', () => {
+  assert.equal(userForGithub(db, 101, 'renamed'), USER);
+  assert.equal(db.prepare('SELECT name FROM users WHERE id = ?').get(USER)!.name, 'renamed');
+  assert.notEqual(userForGithub(db, 202, 'other'), USER);
+});
+
+test('a session cookie finds its user until it expires or ends', () => {
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  const token = createSession(db, USER, now);
+  assert.equal(sessionUser(db, token, now), USER);
+  // Only the hash is stored: the cookie value itself is nowhere in the file.
+  assert.equal(db.prepare('SELECT count(*) AS n FROM sessions WHERE id = ?').get(token)!.n, 0);
+  assert.equal(sessionUser(db, 'forged', now), null);
+  assert.equal(sessionUser(db, token, now + 31 * 86_400_000), null);
+  endSession(db, token);
+  assert.equal(sessionUser(db, token, now), null);
+});
+
+test('the session cookie is Secure only when the request came over HTTPS', () => {
+  // `next start` on http://localhost: production, but plain http. A Secure
+  // cookie here is dropped by Firefox and the sign-in silently goes nowhere.
+  const local = sessionCookie(new Request('http://localhost:3000/api/git/callback'), 't');
+  assert.match(local, /^sid=t; Path=\/; HttpOnly; SameSite=Lax; Max-Age=\d+$/);
+  assert.match(sessionCookie(new Request('https://seo.example/api/git/callback'), 't'), /; Secure$/);
+  // Behind a TLS-terminating proxy the app itself sees http.
+  const proxied = new Request('http://10.0.0.5:3000/api/git/callback', { headers: { 'x-forwarded-proto': 'https' } });
+  assert.match(sessionCookie(proxied, 't'), /; Secure$/);
+  assert.match(sessionCookie(new Request('http://localhost/'), '', 0), /Max-Age=0$/);
+});
+
+test('an audit is queued, run, finished, and swept after a restart', () => {
+  createAudit(db, { id: 'a1', url: 'https://acme.com', params: 'url=https%3A%2F%2Facme.com' });
+  assert.equal(getAudit(db, 'a1')?.status, 'queued');
+  startAudit(db, 'a1');
+  finishAudit(db, 'a1', { result: '{"meta":{}}' });
+  assert.equal(getAudit(db, 'a1')?.status, 'done');
+
+  createAudit(db, { id: 'a2', url: 'https://acme.com', params: '' });
+  startAudit(db, 'a2');
+  assert.equal(abandonAudits(db, 'restarted'), 1);
+  assert.deepEqual([getAudit(db, 'a2')?.status, getAudit(db, 'a2')?.error], ['failed', 'restarted']);
+  assert.equal(getAudit(db, 'a1')?.status, 'done', 'a finished audit is left alone');
+
+  // A week on, the next audit clears out the old ones.
+  createAudit(db, { id: 'a3', url: 'https://acme.com', params: '' }, Date.now() + 8 * 86_400_000);
+  assert.equal(getAudit(db, 'a1'), null);
 });
 
 test('a site with no repository reads as null rather than throwing', () => {
-  assert.equal(linkedRepo(db, LOCAL_USER, 'https://nothing-here.example'), null);
+  assert.equal(linkedRepo(db, USER, 'https://nothing-here.example'), null);
 });
 
 test('a link is found again under every spelling of its origin', () => {
-  linkRepo(db, LOCAL_USER, 'https://acme.com', { owner: 'acme', name: 'website', branch: null });
+  linkRepo(db, USER, 'https://acme.com', { owner: 'acme', name: 'website', branch: null });
 
   // The audit form takes whatever was typed, so these all have to land on the
   // same row. This is the failure the normalisation exists to prevent: a link
   // made from the address bar and invisible to a report run from a bookmark.
   for (const spelling of ['https://acme.com', 'https://acme.com/', 'HTTPS://Acme.com', 'https://acme.com/pricing']) {
-    const found = linkedRepo(db, LOCAL_USER, spelling);
+    const found = linkedRepo(db, USER, spelling);
     assert.ok(found, `not found under ${spelling}`);
     assert.equal(found.owner, 'acme');
     assert.equal(found.name, 'website');
   }
 
   // …and a different site must not find it.
-  assert.equal(linkedRepo(db, LOCAL_USER, 'https://acme.co.uk'), null);
+  assert.equal(linkedRepo(db, USER, 'https://acme.co.uk'), null);
 });
 
 test('siteKey keeps a port and leaves an unparseable origin alone', () => {
@@ -71,9 +119,9 @@ test('siteKey keeps a port and leaves an unparseable origin alone', () => {
 });
 
 test('re-linking edits the row rather than adding one', () => {
-  const first = linkedRepo(db, LOCAL_USER, 'https://acme.com')!;
+  const first = linkedRepo(db, USER, 'https://acme.com')!;
 
-  const second = linkRepo(db, LOCAL_USER, 'https://acme.com/', {
+  const second = linkRepo(db, USER, 'https://acme.com/', {
     owner: 'acme',
     name: 'marketing-site',
     branch: 'next',
@@ -86,29 +134,29 @@ test('re-linking edits the row rather than adding one', () => {
 });
 
 test('an empty branch is stored as null, meaning the default branch', () => {
-  const repo = linkRepo(db, LOCAL_USER, 'https://other.example', { owner: 'o', name: 'n' });
+  const repo = linkRepo(db, USER, 'https://other.example', { owner: 'o', name: 'n' });
   assert.equal(repo.branch, null);
 });
 
 test('unlinking reports whether there was anything to unlink', () => {
-  assert.equal(unlinkRepo(db, LOCAL_USER, 'https://acme.com'), true);
-  assert.equal(unlinkRepo(db, LOCAL_USER, 'https://acme.com'), false);
-  assert.equal(linkedRepo(db, LOCAL_USER, 'https://acme.com'), null);
+  assert.equal(unlinkRepo(db, USER, 'https://acme.com'), true);
+  assert.equal(unlinkRepo(db, USER, 'https://acme.com'), false);
+  assert.equal(linkedRepo(db, USER, 'https://acme.com'), null);
 });
 
 test('linkedRepos is keyed the way the report looks it up', () => {
-  linkRepo(db, LOCAL_USER, 'HTTPS://Keyed.example/pricing', { owner: 'a', name: 'b' });
-  assert.equal(linkedRepos(db, LOCAL_USER)[siteKey('https://keyed.example/')]?.name, 'b');
+  linkRepo(db, USER, 'HTTPS://Keyed.example/pricing', { owner: 'a', name: 'b' });
+  assert.equal(linkedRepos(db, USER)[siteKey('https://keyed.example/')]?.name, 'b');
 });
 
 test('a GitHub account is saved once, replaced on reconnect, and forgotten', () => {
-  assert.equal(githubAccount(db, LOCAL_USER), null);
-  saveGithubAccount(db, LOCAL_USER, { login: 'one', token: 't1', refreshToken: 'r1', expiresAt: null });
+  assert.equal(githubAccount(db, USER), null);
+  saveGithubAccount(db, USER, { login: 'one', token: 't1', refreshToken: 'r1', expiresAt: null });
   const two = { login: 'two', token: 't2', refreshToken: 'r2', expiresAt: '2026-01-01T08:00:00.000Z' };
-  saveGithubAccount(db, LOCAL_USER, two);
-  assert.deepEqual(githubAccount(db, LOCAL_USER), two);
-  forgetGithubAccount(db, LOCAL_USER);
-  assert.equal(githubAccount(db, LOCAL_USER), null);
+  saveGithubAccount(db, USER, two);
+  assert.deepEqual(githubAccount(db, USER), two);
+  forgetGithubAccount(db, USER);
+  assert.equal(githubAccount(db, USER), null);
 });
 
 test('a store from before the GitHub App is migrated in place', () => {
@@ -129,8 +177,8 @@ test('a store from before the GitHub App is migrated in place', () => {
 
   const store = openDb(old);
   // The link survives, with no installation; the OAuth app's token does not.
-  assert.equal(linkedRepo(store, LOCAL_USER, 'https://old.example')?.installationId, null);
-  assert.equal(githubAccount(store, LOCAL_USER), null);
-  const linked = linkRepo(store, LOCAL_USER, 'https://old.example', { owner: 'a', name: 'b', installationId: 42 });
+  assert.equal(linkedRepo(store, 1, 'https://old.example')?.installationId, null);
+  assert.equal(githubAccount(store, 1), null);
+  const linked = linkRepo(store, 1, 'https://old.example', { owner: 'a', name: 'b', installationId: 42 });
   assert.equal(linked.installationId, 42);
 });

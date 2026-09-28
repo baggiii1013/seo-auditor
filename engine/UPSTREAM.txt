@@ -21,6 +21,15 @@ worker/index.mjs, /stream — two `.catch(() => {})` guards, both marked PATCHED
 
   Worth sending upstream — it is a bug in any local adapter, not just here.
 
+src/http.mjs — `guardFetches()`, a hook every Fetcher.get asks before it
+  fetches, marked PATCHED.
+
+  A hosted crawler fetches whatever a form, sitemap or link names, so without
+  it a page listing http://169.254.169.254/ reads the server's cloud metadata
+  into a report. The rule needs DNS, which differs between Node and Workers,
+  so the engine only asks; lib/ssrf.ts answers. Unset, nothing changes —
+  upstream behaviour is untouched.
+
 src/console.mjs:484 — two `/*turbopackIgnore: true*/` comments.
 
   `dotfile` is ~/.config/seo-audit/.env, outside the project by design, so
@@ -34,8 +43,8 @@ The front ends and the internal server are gone: mac/ (the SwiftUI app),
 desktop/ (the Tauri shell), raycast/ (the extension), Casks/, Package.swift,
 src/serve.mjs (`--serve`, the node:http adapter around the worker) and their
 workflows, scripts and tests. Next.js is the only front end here, and
-app/api/engine/[...path]/route.ts is the only adapter — it calls
-worker/index.mjs directly, which is why worker/ stays.
+lib/engine.ts is the only adapter — it calls worker/index.mjs directly for
+preview, stream and render, which is why worker/ stays.
 
 A diff against upstream will show all of it as deleted. That is deliberate,
 not drift.

@@ -4,6 +4,17 @@
 
 const DEFAULT_UA = 'seo-audit (+https://github.com/nurkamol/seo-audit)';
 
+// PATCHED (see UPSTREAM.txt): a hook every fetch asks first. A crawler with a
+// public address fetches whatever a sitemap or a link names, so a page listing
+// `http://169.254.169.254/` would have the server read its own cloud metadata
+// into the report. What counts as off-limits needs DNS, which differs between
+// Node and Workers, so the host that runs the engine supplies the rule; this
+// file only makes sure nothing skips it. Returns a reason to refuse, or null.
+let guard = null;
+export const guardFetches = (fn) => {
+  guard = fn;
+};
+
 export class Fetcher {
   /** @param {{concurrency?: number, timeout?: number}} opts */
   constructor({ concurrency = 6, timeout = 20000, userAgent = DEFAULT_UA } = {}) {
@@ -88,6 +99,10 @@ export class Fetcher {
     const attempt = async () => {
       await this.#quiet();
       const started = Date.now();
+      const refused = guard ? await guard(url) : null;
+      if (refused) {
+        return { url, status: 0, ok: false, headers: new Headers(), body: '', location: null, ms: 0, error: refused, permanent: true };
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), this.timeout);
       try {

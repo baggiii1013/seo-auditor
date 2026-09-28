@@ -144,16 +144,32 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
       window.removeEventListener('message', onMessage);
       clearInterval(watch);
     };
-    // Back from GitHub: look again. After the first Import, which sent the user
-    // there to pick, one repository picked is one repository imported — no
-    // second Import on a list of one.
-    const back = async () => {
-      if (thenImport) {
-        const data = await fetch('/api/git/repos')
-          .then((res) => res.json())
-          .catch(() => null);
-        if (data?.repos?.length === 1) return link(data.repos[0].fullName);
+    // Back from GitHub, however it ended — the callback's message, or the
+    // popup simply closing. Either way the server is asked who is signed in
+    // rather than trusted from the message: the message can be lost (a popup
+    // whose opener was cut off, a page on another origin) and the cookie is
+    // what every later request goes by anyway.
+    //
+    // After the first Import, which sent the user there to pick, one
+    // repository picked is one repository imported — no second Import on a
+    // list of one.
+    const back = async (signedIn = false) => {
+      const res = await fetch('/api/git/repos').catch(() => null);
+      const data = res?.ok ? await res.json().catch(() => null) : null;
+      if (!data?.login) {
+        // Closed before finishing says nothing. GitHub saying yes and this
+        // browser still arriving as nobody means the cookie was not kept.
+        if (signedIn) {
+          setError(
+            'GitHub signed you in, but this browser did not keep the session cookie. Allow cookies for this site, and open it at the same address as the GitHub App’s callback URL.',
+          );
+        }
+        return;
       }
+      setAccount({ login: data.login });
+      setOpen(true);
+      router.refresh();
+      if (thenImport && data.repos?.length === 1) return link(data.repos[0].fullName);
       setReload((n) => n + 1);
     };
     const onMessage = (e: MessageEvent) => {
@@ -161,10 +177,7 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
       finish();
       win.close();
       if (!e.data.ok) return setError(e.data.message);
-      setAccount({ login: e.data.message });
-      setOpen(true);
-      router.refresh();
-      back();
+      back(true);
     };
     // Adjusting permissions can end on GitHub without coming back through the
     // callback, so the popup closing is a reason to look again too.

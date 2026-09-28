@@ -307,9 +307,9 @@ export function classify(paths: string[], truncated: boolean): TrackedFile[] {
 export type RepoChoice = { fullName: string; private: boolean; pushedAt: string; defaultBranch: string };
 
 /** The login a token belongs to — what the panel shows as "connected as". */
-export async function whoami(token: string): Promise<string | null> {
+export async function whoami(token: string): Promise<{ id: number; login: string } | null> {
   const res = await get('/user', token).catch(() => null);
   if (!res?.ok) return null;
   const user = await res.json().catch(() => null);
-  return typeof user?.login === 'string' ? user.login : null;
+  return typeof user?.login === 'string' && typeof user?.id === 'number' ? { id: user.id, login: user.login } : null;
 }

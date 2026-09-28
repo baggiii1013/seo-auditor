@@ -20,7 +20,7 @@ import {
 import { parseRobots, robotsVerdict } from '../src/robots.mjs';
 import { parseRedirectMap, redirectChecks } from '../src/redirects.mjs';
 import { audit } from '../src/audit.mjs';
-import { Fetcher } from '../src/http.mjs';
+import { Fetcher, guardFetches } from '../src/http.mjs';
 import { startFixtureSite } from './server.mjs';
 import { askForSite, isInteractive, invocation } from '../src/prompt.mjs';
 import { plural } from '../src/text.mjs';
@@ -5554,5 +5554,36 @@ test('a report with no answer-engine sheet prints no empty section', async () =>
   for (const [name, render] of [['terminal', terminal], ['markdown', markdown], ['html', html]]) {
     assert.doesNotMatch(render([], meta, { score }), /Answer engines/,
       `${name} should not print the section when there is no sheet`);
+  }
+});
+
+// PATCHED (see UPSTREAM.txt): the host's guard is asked before every fetch,
+// and a refusal is a permanent failure — never retried, never sent.
+test('a guarded fetch is refused before anything leaves, and not retried', async () => {
+  const asked = [];
+  const realFetch = globalThis.fetch;
+  let sent = 0;
+  globalThis.fetch = async () => {
+    sent++;
+    return new Response('ok', { status: 200, headers: { 'content-type': 'text/plain' } });
+  };
+  guardFetches(async (url) => {
+    asked.push(url);
+    return url.includes('169.254') ? 'a private address' : null;
+  });
+  try {
+    const fetcher = new Fetcher();
+    const refused = await fetcher.get('http://169.254.169.254/latest/meta-data/');
+    assert.equal(refused.status, 0);
+    assert.equal(refused.error, 'a private address');
+    assert.equal(sent, 0, 'a refused URL must never reach fetch');
+    assert.equal(asked.length, 1, 'a refusal is permanent, so it is asked once, not per retry');
+
+    const allowed = await fetcher.get('https://example.com/');
+    assert.equal(allowed.status, 200);
+    assert.equal(sent, 1);
+  } finally {
+    guardFetches(null);
+    globalThis.fetch = realFetch;
   }
 });

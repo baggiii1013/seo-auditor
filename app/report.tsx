@@ -35,11 +35,8 @@ const download = (name: string, body: BlobPart, type: string) => {
  *  and never formats a report itself, so a file saved here and a file saved by
  *  the CLI are the same document. */
 async function render(report: Report, as: 'html' | 'markdown' | 'csv') {
-  const res = await fetch(`/api/engine/render?as=${as}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ meta: report.meta, findings: report.findings, score: report.score }),
-  });
+  // From the copy the server kept of this run, by its id.
+  const res = await fetch(`/api/audits/${report.id}/export?as=${as}`);
   if (!res.ok) throw new Error(await res.text());
   return res.text();
 }

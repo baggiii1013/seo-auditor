@@ -34,6 +34,9 @@ const input =
 // don't list it, hence the spread.
 const noRestore = { autoComplete: 'off' } as object;
 
+/** This tab's crawl, `{ id, url }`, so a reload can find it again. */
+const RUN_KEY = 'seo-auditor:run';
+
 const ghost =
   'rounded-lg border border-line bg-white/[0.06] px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
 
@@ -251,6 +254,7 @@ export default function Auditor({ fields, agents, git }: { fields: Field[]; agen
   const [report, setReport] = useState<Report | null>(null);
 
   const source = useRef<EventSource | null>(null);
+  const audit = useRef<string | null>(null);
 
   useEffect(() => () => source.current?.close(), []);
 
@@ -268,7 +272,7 @@ export default function Auditor({ fields, agents, git }: { fields: Field[]; agen
     setPlan(null);
     setPreviewing(true);
     try {
-      const res = await fetch(`/api/engine/preview?${params()}`);
+      const res = await fetch(`/api/preview?${params()}`);
       if (!res.ok) throw new Error(await res.text());
       setPlan(await res.json());
     } catch (err) {
@@ -278,18 +282,15 @@ export default function Auditor({ fields, agents, git }: { fields: Field[]; agen
     }
   };
 
-  const run = () => {
-    setError(null);
-    setPlan(null);
-    setReport(null);
-    setLog([]);
-    setPhases([]);
+  /** Follow a crawl the server is running. The id is kept for this tab, so a
+   *  reload lands back on the same crawl — or on its report — instead of
+   *  starting over. */
+  const follow = (id: string, site: string) => {
+    sessionStorage.setItem(RUN_KEY, JSON.stringify({ id, url: site }));
     setRunning(true);
-
-    const search = params();
-    search.set('format', 'json');
-    const es = new EventSource(`/api/engine/stream?${search}`);
+    const es = new EventSource(`/api/audits/${id}/events`);
     source.current = es;
+    audit.current = id;
 
     es.addEventListener('progress', (e) => {
       const line: string = JSON.parse(e.data);
@@ -297,7 +298,7 @@ export default function Auditor({ fields, agents, git }: { fields: Field[]; agen
       // every line. Accumulated here rather than derived from `log` because the
       // log is capped and the early phases would fall out of the window.
       const name = line.slice(0, 9).trim();
-      if (name && name !== 'note') setPhases((p) => (p.includes(name) ? p : [...p, name]));
+      if (name && name !== 'note' && name !== 'queued') setPhases((p) => (p.includes(name) ? p : [...p, name]));
       // Capped: a large crawl streams thousands of lines, and a DOM holding
       // every one of them is what makes the page stutter, not the crawl.
       setLog((lines) => [...lines, line].slice(-400));
@@ -308,25 +309,63 @@ export default function Auditor({ fields, agents, git }: { fields: Field[]; agen
       es.close();
     });
     es.addEventListener('failed', (e) => {
+      sessionStorage.removeItem(RUN_KEY);
       setError(JSON.parse(e.data));
       setRunning(false);
       es.close();
     });
-    // EventSource reconnects on a closed stream, so a failure that is not one of
-    // the two events above has to stop it here or the crawl starts again.
+    // A dropped connection is retried by EventSource itself, and costs nothing
+    // now: the crawl runs on the server, and the retry resumes after the last
+    // line seen. Only a refusal — the server saying no — ends it here.
     es.onerror = () => {
-      es.close();
+      if (es.readyState !== EventSource.CLOSED) return;
+      sessionStorage.removeItem(RUN_KEY);
       setRunning(false);
-      setError((was) => was ?? 'The connection to the engine dropped.');
+      setError((was) => was ?? 'That audit is no longer on the server.');
     };
+  };
+
+  // Back from a reload mid-crawl, or onto a report this tab already ran.
+  useEffect(() => {
+    const saved = JSON.parse(sessionStorage.getItem(RUN_KEY) ?? 'null');
+    if (!saved?.id) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resuming what the server is already doing
+    setUrl(saved.url ?? '');
+    follow(saved.id, saved.url ?? '');
+  }, []);
+
+  const run = async () => {
+    setError(null);
+    setPlan(null);
+    setReport(null);
+    setLog([]);
+    setPhases([]);
+    setRunning(true);
+
+    const res = await fetch(`/api/audits?${params()}`, { method: 'POST' }).catch(() => null);
+    if (!res?.ok) {
+      setRunning(false);
+      setError(res ? await res.text() : 'Could not reach the server.');
+      return;
+    }
+    follow((await res.json()).id, url);
   };
 
   const stop = () => {
     source.current?.close();
+    sessionStorage.removeItem(RUN_KEY);
+    // Takes it off the queue if it has not started; see cancel() in lib/audits.ts.
+    if (audit.current) fetch(`/api/audits/${audit.current}`, { method: 'DELETE' }).catch(() => {});
     setRunning(false);
   };
 
-  if (report) return <ReportView report={report} git={git} onReset={() => setReport(null)} />;
+  if (report) {
+    const reset = () => {
+      sessionStorage.removeItem(RUN_KEY);
+      setReport(null);
+    };
+    return <ReportView report={report} git={git} onReset={reset} />;
+  }
 
   if (running || log.length > 0) {
     return (

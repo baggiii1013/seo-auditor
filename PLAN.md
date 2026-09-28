@@ -171,11 +171,10 @@ Phase 0 only if `smee.io` setup is painless. Otherwise do it in Phase C, which n
 **Also delete:** the old OAuth-only code in `callback/route.ts` and `listRepos` / `/user/repos`
 in `lib/github.ts`. Nothing else should keep using the old `repo` scope.
 
-### Optional: sign-in with the same app
+### Sign-in with the same app — done, see Phase 0.5
 
-`users` holds one row (`LOCAL_USER`). The GitHub user token already identifies the person, so
-"Sign in with GitHub" is `users.github_id` plus a session cookie. It is needed before this is
-hosted for anyone but you, but not for Phases A–C locally. Track it separately.
+Auditing needs no sign-in. Continuing with GitHub creates a `users` row keyed by `github_id`
+and a session cookie in that browser; links and tokens are scoped to it.
 
 ### Done when
 
@@ -184,6 +183,52 @@ hosted for anyone but you, but not for Phases A–C locally. Track it separately
 - Adjust permissions → add a repo → it appears without reloading the page.
 - Uninstalling the app on GitHub turns the link into "Reconnect", not a fake "missing".
 - `npm run test:app`, `npx tsc --noEmit` and `npm run lint` are clean.
+
+---
+
+## Phase 0.5 — Backend hardening (done)
+
+The app used to proxy every request under `/api/engine/*` straight into the engine's worker,
+presenting the worker's password on the caller's behalf. Before anything writes to repos:
+
+| Problem | Fix | Where |
+|---|---|---|
+| Catch-all proxy exposed every worker route (report library, compare, export) to anyone | Five narrow routes; nothing else of the worker is reachable | `app/api/preview`, `app/api/audits/**`, `lib/engine.ts` |
+| PageSpeed, Search Console and crt.sh spent the operator's quota for any visitor | Off unless `ALLOW_PSI` / `ALLOW_SEARCH_CONSOLE` / `ALLOW_HOSTS` = 1; the form hides what is off | `lib/engine.ts`, `app/page.tsx` |
+| A crawl could fetch internal addresses (cloud metadata, localhost, LAN) | Every engine fetch asks `refuseInternal()` first; the form's URL is refused up front | `engine/src/http.mjs` (hook), `lib/ssrf.ts` |
+| One shared `LOCAL_USER`: whoever connected GitHub did so for every visitor | Session cookie (`sid`, HttpOnly, SameSite=Lax, Secure in prod, 30 days; only its SHA-256 is stored) created by the GitHub callback; links and tokens per user | `lib/db.ts`, `lib/git-state.ts`, `app/api/git/**` |
+| A crawl lived inside one request: dropped with the browser, unbounded concurrency, report only in the tab | Crawls are jobs: queued, `AUDIT_CONCURRENCY` at a time (default 2), 2 per address, report stored for 7 days; the browser follows `/api/audits/<id>/events` and resumes after a reload | `lib/audits.ts` |
+| Exports rendered any JSON a caller posted | Exports render the stored report by id | `app/api/audits/[id]/export` |
+| No request limits | Per-address: 10 audits, 30 previews, 60 exports an hour | `lib/limit.ts` |
+
+Known ceilings, each marked `ponytail:` in the code:
+
+- The queue, live logs and rate-limit counts are one process's memory. More than one process
+  means moving them to the store (or Redis).
+- A running crawl cannot be cancelled — the engine takes no abort signal. Stop only removes a
+  queued one.
+- DNS rebinding can slip past the address check (checked, then resolved again by `fetch`).
+- `X-Forwarded-For` is trusted: run behind a proxy that overwrites it.
+
+### Hosting
+
+A long-lived Node process with a persistent disk — a VPS, Fly.io or Railway with a volume, not
+serverless. Crawls run for minutes in the background, and SQLite plus the job queue live on
+that one machine.
+
+```bash
+npm ci && npm run build
+SEO_AUDIT_HOME=/data NODE_ENV=production npm start   # behind a TLS proxy
+```
+
+| Env | Default | |
+|---|---|---|
+| `SEO_AUDIT_HOME` | `~/.local/share/seo-audit` | Where `app.db` lives — put it on the volume |
+| `AUDIT_CONCURRENCY` | 2 | Crawls at once, for the whole server |
+| `MAX_PAGES` / `MAX_CONCURRENCY` | 150 / 12 | Ceilings on what the form may ask for |
+| `ALLOW_PSI`, `ALLOW_SEARCH_CONSOLE`, `ALLOW_HOSTS` | off | Operator's own quotas; local use only |
+| `ALLOW_PRIVATE_HOSTS` | off | Audit sites on your own network; never on a public deployment |
+| `GITHUB_APP_*` | — | See Phase 0; the callback URL becomes `https://<domain>/api/git/callback` |
 
 ---
 
@@ -382,7 +427,6 @@ with the score change, and a production re-scan on merge.
 
 ## Before this is hosted for other people (not in any phase above)
 
-- Sign-in (GitHub via the same app) and real `users` rows instead of `LOCAL_USER`.
 - Encrypt tokens at rest (the key in env, AES-GCM with `node:crypto`).
 - Per-user rate limits and spend caps on B/C, then billing.
 - Audit log of every write we make to a user's repo.

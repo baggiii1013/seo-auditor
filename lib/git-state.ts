@@ -1,11 +1,16 @@
-import { libraryRoot } from '@/engine/src/library.mjs';
+import { cookies } from 'next/headers';
 
-import { LOCAL_USER, forgetGithubAccount, githubAccount, linkedRepos, openDb, saveGithubAccount, type Repo } from './db';
+import { SESSION_COOKIE, forgetGithubAccount, githubAccount, linkedRepos, saveGithubAccount, sessionUser, type Repo } from './db';
 import { envToken } from './github';
 import { appConfigured, installationToken, refreshUserToken } from './github-app';
+import { store } from './store';
 
 // Who GitHub is read as, and what is linked — server-side only. The page reads
 // this at render so the report can draw the panel without calling /api/git.
+//
+// Auditing needs nobody. Only linking a repository does: continuing with GitHub
+// puts a random session id in this browser's cookie, and everything it unlocks
+// — the GitHub tokens, the links — stays in the store, looked up by that id.
 
 /** Who signed in through the GitHub App, or nobody. Never a token: this
  *  crosses to the browser. */
@@ -13,35 +18,42 @@ export type GitAccount = { login: string } | null;
 
 export type GitState = { account: GitAccount; canConnect: boolean; links: Record<string, Repo> };
 
-export const store = () => openDb(libraryRoot());
+/** The signed-in user behind this request's cookie, or `null` for a visitor
+ *  who never continued with GitHub. */
+export async function currentUser(): Promise<number | null> {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  return token ? sessionUser(store(), token) : null;
+}
 
 // Two requests refreshing at once would both spend the same refresh token, and
 // GitHub rotates it on first use — so the second would fail and sign the user
-// out. One refresh at a time, shared by everyone waiting on it.
-let refreshing: Promise<string | null> | null = null;
+// out. One refresh per user at a time, shared by everyone waiting on it.
+const refreshing = new Map<number, Promise<string | null>>();
 
-/** The signed-in user's token, refreshed when it is about to expire. `null`
- *  when nobody is signed in, or the refresh was refused — which signs them out,
+/** `userId`'s GitHub token, refreshed when it is about to expire. `null` when
+ *  they never connected, or the refresh was refused — which signs them out,
  *  because a token that cannot be renewed is one that is about to stop. */
-export async function userToken(): Promise<string | null> {
-  const saved = githubAccount(store(), LOCAL_USER);
+export async function userToken(userId: number): Promise<string | null> {
+  const saved = githubAccount(store(), userId);
   if (!saved) return null;
   if (!saved.expiresAt || Date.parse(saved.expiresAt) - Date.now() > 60_000) return saved.token;
   if (!saved.refreshToken) return null;
 
-  refreshing ??= refreshUserToken(saved.refreshToken)
-    .then((fresh) => {
-      if ('error' in fresh) {
-        forgetGithubAccount(store(), LOCAL_USER);
-        return null;
-      }
-      saveGithubAccount(store(), LOCAL_USER, { login: saved.login, ...fresh });
-      return fresh.token;
-    })
-    .finally(() => {
-      refreshing = null;
-    });
-  return refreshing;
+  let pending = refreshing.get(userId);
+  if (!pending) {
+    pending = refreshUserToken(saved.refreshToken)
+      .then((fresh) => {
+        if ('error' in fresh) {
+          forgetGithubAccount(store(), userId);
+          return null;
+        }
+        saveGithubAccount(store(), userId, { login: saved.login, ...fresh });
+        return fresh.token;
+      })
+      .finally(() => refreshing.delete(userId));
+    refreshing.set(userId, pending);
+  }
+  return pending;
 }
 
 /** What to read `repo` as. The installation it was linked through when there
@@ -58,13 +70,15 @@ export async function tokenFor(repo: Repo | null): Promise<{ token: string | nul
 
 /** Never throws: this runs on every render of the home page, and a broken
  *  store must cost the git panel, not the auditor. */
-export function gitState(): GitState {
+export async function gitState(): Promise<GitState> {
+  const canConnect = appConfigured();
   try {
-    const saved = githubAccount(store(), LOCAL_USER);
+    const user = await currentUser();
+    const saved = user ? githubAccount(store(), user) : null;
     return {
       account: saved ? { login: saved.login } : null,
-      canConnect: appConfigured(),
-      links: linkedRepos(store(), LOCAL_USER),
+      canConnect,
+      links: user ? linkedRepos(store(), user) : {},
     };
   } catch (err) {
     console.error('git state unavailable:', err);
