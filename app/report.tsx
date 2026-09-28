@@ -484,10 +484,6 @@ export default function ReportView({ report, git, onReset }: { report: Report; g
             {meta.notIndexable ? ` · ${meta.notIndexable} not indexable` : ''}
             {meta.ignored ? ` · ${meta.ignored} findings silenced by config` : ''}
           </p>
-          {/* Context for the numbers below rather than a finding among them,
-              so it goes in the header beside the crawl summary and not into
-              the masonry. */}
-          <GitPanel origin={meta.origin} git={git} />
         </div>
         <button onClick={onReset} className={ghost}>
           New audit
@@ -540,6 +536,10 @@ export default function ReportView({ report, git, onReset }: { report: Report; g
           </>
         )}
       </section>
+
+      {/* Context for the findings below rather than a finding among them, so
+          full width here and not in the masonry. */}
+      <GitPanel origin={meta.origin} git={git} />
 
       <Jump score={score.score} grade={score.grade ?? '—'} areas={byArea} />
 

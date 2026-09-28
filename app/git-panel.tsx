@@ -7,9 +7,8 @@
 // it in the report's own terms: a present file, a missing file, and a file we
 // could not tell about are three states, not two.
 //
-// It sits in the report header rather than on a card of its own, because it is
-// the same kind of sentence as "40 pages crawled · 1.2s": context for the
-// numbers below, not a finding among them.
+// A card of its own, full width under the score: it is context for the
+// findings below rather than one of them, so it stays out of the masonry.
 
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
@@ -29,13 +28,18 @@ const DOT: Record<FileState, { state: 'passed' | 'failed' | 'skipped'; label: st
   unknown: { state: 'skipped', label: 'Could not tell' },
 };
 
+// The same field, primary and ghost the audit form uses (auditor.tsx).
 const field =
-  'min-w-0 flex-1 rounded-md border border-line bg-white/[0.06] px-2.5 py-1 font-mono text-xs text-ink outline-none transition duration-150 ease-out placeholder:text-ink/45 focus:border-brand focus:ring-2 focus:ring-brand/15';
+  'min-w-0 flex-1 rounded-lg border border-line bg-white/[0.06] px-3 py-2 text-sm text-ink outline-none transition duration-150 ease-out placeholder:text-ink/50 focus:border-brand focus:ring-2 focus:ring-brand/15';
 
 const connectButton =
-  'shrink-0 rounded-md bg-brand px-3 py-1.5 text-xs font-medium text-white shadow-sm transition duration-150 ease-out hover:bg-[#ef5314] active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100';
+  'shrink-0 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white shadow-sm transition duration-150 ease-out hover:bg-[#ef5314] active:scale-[0.98] disabled:opacity-35 disabled:active:scale-100';
 
 const action =
+  'shrink-0 rounded-lg border border-line bg-white/[0.06] px-4 py-2 text-sm font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.98] disabled:opacity-40 disabled:active:scale-100';
+
+// The row-sized ghost, for Import beside each repository in the list.
+const small =
   'shrink-0 rounded-md border border-line bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100';
 
 export default function GitPanel({ origin, git }: { origin: string; git: GitState }) {
@@ -142,24 +146,50 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
 
   const seen = look?.ok ? look.repo : null;
 
+  const picking = !repo && open && !!account;
+
   return (
-    <div className="enter-fade mt-2 text-xs">
-      {repo ? (
-        <>
-          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-page-ink/70">
+    <section className="card enter-fade p-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 max-w-xl">
+          <h3 className="t-eyebrow text-ink/45">Repository</h3>
+          <p className="mt-2 text-sm leading-relaxed text-ink/55">
+            {repo
+              ? 'Checked against the files this report asks for, so you can see which are already there.'
+              : 'Link the GitHub repository behind this site to see whether robots.txt, sitemap.xml and llms.txt are already in it. Read-only — nothing is written back.'}
+          </p>
+        </div>
+        {repo ? (
+          <button onClick={() => send({ method: 'DELETE' })} disabled={busy} className={action}>
+            Unlink
+          </button>
+        ) : picking ? null : account ? (
+          <button onClick={() => setOpen(true)} className={connectButton}>
+            <span aria-hidden>⎇ </span>Connect a repository
+          </button>
+        ) : (
+          <button onClick={connect} className={connectButton}>
+            <span aria-hidden>⎇ </span>Connect GitHub
+          </button>
+        )}
+      </div>
+
+      {repo && (
+        <div className="enter-fade">
+          <div className="mt-4 flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm text-ink/70">
             <a
               href={seen?.url ?? `https://github.com/${repo.owner}/${repo.name}`}
               target="_blank"
               rel="noreferrer"
-              className="font-mono underline decoration-page-ink/25 underline-offset-2 transition-colors duration-150 ease-out hover:text-brand"
+              className="font-mono font-medium text-ink underline decoration-ink/25 underline-offset-2 transition-colors duration-150 ease-out hover:text-brand"
             >
               <span aria-hidden>⎇ </span>
               {repo.owner}/{repo.name}
             </a>
-            {seen && <span className="font-mono text-page-ink/55">@ {seen.branch}</span>}
-            {seen?.private && <span className="t-eyebrow text-page-ink/55">Private</span>}
+            {seen && <span className="font-mono text-xs text-ink/55">@ {seen.branch}</span>}
+            {seen?.private && <span className="t-eyebrow text-ink/55">Private</span>}
             {seen?.commit && (
-              <span className="min-w-0 truncate text-page-ink/55">
+              <span className="min-w-0 truncate text-xs text-ink/55">
                 ·{' '}
                 <a
                   href={seen.commit.url}
@@ -172,34 +202,33 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
                 {seen.commit.message}
               </span>
             )}
-            <button onClick={() => send({ method: 'DELETE' })} disabled={busy} className={`${action} ml-1`}>
-              Unlink
-            </button>
           </div>
 
           {/* The reason, not a shrug. A panel that fails silently here is a
               reader concluding the repository is empty. */}
-          {look && !look.ok && (
-            <p className="mt-1.5 text-page-ink/70">{look.reason}</p>
-          )}
+          {look && !look.ok && <p className="mt-3 text-sm text-ink/60">{look.reason}</p>}
 
           {seen && (
-            <ul className="mt-1.5 space-y-1">
+            <ul className="mt-4 divide-y divide-line/60 rounded-xl border border-line">
               {seen.files.map((file) => (
-                <li key={file.name} className="flex items-start gap-2">
-                  <span className="mt-px">
+                <li key={file.name} className="flex items-start gap-3 px-4 py-2.5">
+                  <span className="mt-0.5">
                     <StateDot state={DOT[file.state].state} label={DOT[file.state].label} />
                   </span>
-                  <span className="font-mono text-page-ink/70">{file.path ?? file.name}</span>
-                  {file.state === 'missing' && <span className="text-page-ink/55">not in the repo</span>}
-                  {file.why && <span className="min-w-0 text-page-ink/55">{file.why}</span>}
+                  <div className="min-w-0 flex-1">
+                    <span className="font-mono text-sm text-ink/80">{file.path ?? file.name}</span>
+                    {file.why && <p className="mt-0.5 text-xs text-ink/50">{file.why}</p>}
+                  </div>
+                  <span className="t-eyebrow shrink-0 pt-1 text-ink/50">{DOT[file.state].label}</span>
                 </li>
               ))}
             </ul>
           )}
-        </>
-      ) : open && account ? (
-        <div className="enter-fade max-w-md">
+        </div>
+      )}
+
+      {picking && (
+        <div className="enter-fade mt-4">
           <div className="flex items-center gap-2">
             <input
               value={input}
@@ -214,17 +243,17 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
             </button>
           </div>
           {!repos ? (
-            !error && <p className="mt-1.5 text-page-ink/55">Loading repositories…</p>
+            !error && <p className="mt-3 text-sm text-ink/55">Loading repositories…</p>
           ) : (
-            <ul className="mt-1.5 max-h-64 divide-y divide-line overflow-y-auto rounded-md border border-line">
+            <ul className="mt-3 max-h-72 divide-y divide-line/60 overflow-y-auto rounded-xl border border-line">
               {repos
                 .filter((r) => r.fullName.toLowerCase().includes(input.trim().toLowerCase()))
                 .slice(0, 50)
                 .map((r) => (
-                  <li key={r.fullName} className="flex items-center gap-2 px-2.5 py-1.5">
-                    <span className="min-w-0 flex-1 truncate font-mono text-page-ink/80">{r.fullName}</span>
-                    {r.private && <span className="t-eyebrow text-page-ink/55">Private</span>}
-                    <button onClick={() => link(r.fullName)} disabled={busy} className={action}>
+                  <li key={r.fullName} className="flex items-center gap-3 px-4 py-2">
+                    <span className="min-w-0 flex-1 truncate font-mono text-sm text-ink/80">{r.fullName}</span>
+                    {r.private && <span className="t-eyebrow text-ink/50">Private</span>}
+                    <button onClick={() => link(r.fullName)} disabled={busy} className={small}>
                       Import
                     </button>
                   </li>
@@ -232,25 +261,20 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
             </ul>
           )}
           {account.via === 'oauth' && (
-            <p className="mt-1.5 text-page-ink/55">
+            <p className="mt-3 text-xs text-ink/50">
               Connected as <span className="font-mono">{account.login}</span> ·{' '}
-              <button onClick={disconnect} className="underline underline-offset-2 hover:text-brand">
+              <button
+                onClick={disconnect}
+                className="underline underline-offset-2 transition-colors duration-150 ease-out hover:text-brand"
+              >
                 Disconnect
               </button>
             </p>
           )}
         </div>
-      ) : account ? (
-        <button onClick={() => setOpen(true)} className={connectButton}>
-          <span aria-hidden>⎇ </span>Connect a repository
-        </button>
-      ) : (
-        <button onClick={connect} className={connectButton}>
-          <span aria-hidden>⎇ </span>Connect GitHub
-        </button>
       )}
 
-      {error && <p className="mt-1.5 text-page-ink/70">{error}</p>}
-    </div>
+      {error && <p className="mt-3 text-sm text-ink/70">{error}</p>}
+    </section>
   );
 }
