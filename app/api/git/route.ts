@@ -1,5 +1,6 @@
 import { LOCAL_USER, linkRepo, linkedRepo, unlinkRepo } from '@/lib/db';
-import { gitAuth, store } from '@/lib/git-state';
+import { installationFor } from '@/lib/github-app';
+import { store, tokenFor, userToken } from '@/lib/git-state';
 import { look, parseRepo, type Look } from '@/lib/github';
 import type { Repo } from '@/lib/db';
 
@@ -20,7 +21,13 @@ export async function GET(request: Request) {
   if (!origin) return bad('An `origin` is required.');
   const repo = linkedRepo(store(), LOCAL_USER, origin);
   if (!repo) return Response.json({ repo: null } satisfies Payload);
-  const seen = await look(repo.owner, repo.name, repo.branch, gitAuth().token);
+  const { token, lost } = await tokenFor(repo);
+  const seen: Look = lost
+    ? {
+        ok: false,
+        reason: `The GitHub App can no longer reach ${repo.owner}/${repo.name} — it was uninstalled, or the repository was taken off its list. Adjust its permissions on GitHub, or unlink and import it again.`,
+      }
+    : await look(repo.owner, repo.name, repo.branch, token);
   return Response.json({ repo, look: seen } satisfies Payload);
 }
 
@@ -38,14 +45,23 @@ export async function POST(request: Request) {
   const parsed = parseRepo(body.repo ?? '');
   if (!parsed) return bad('That is not a repository.');
 
-  // Look before writing. A link to a repository that cannot be read is a line
-  // in the report header claiming a connection there isn't one — and the reason
-  // that comes back is already the instruction for fixing it. `null` branch:
-  // the default one, resolved at read time.
-  const seen = await look(parsed.owner, parsed.name, null, gitAuth().token);
+  const user = await userToken();
+  if (!user) return bad('Continue with GitHub first.', 401);
+
+  // Look before writing, and look *as the user*: a user token only reaches
+  // repositories that person can see and the app is installed on, so a
+  // successful look is the permission check. The installation is then asked of
+  // GitHub, never taken from the browser. `null` branch: the default one,
+  // resolved at read time.
+  const seen = await look(parsed.owner, parsed.name, null, user);
   if (!seen.ok) return bad(seen.reason, 422);
 
-  const repo = linkRepo(store(), LOCAL_USER, origin, { ...parsed, branch: null });
+  const installationId = await installationFor(parsed.owner, parsed.name);
+  if (!installationId) {
+    return bad(`The GitHub App is not installed on ${parsed.owner}/${parsed.name}. Adjust its permissions to add it.`, 422);
+  }
+
+  const repo = linkRepo(store(), LOCAL_USER, origin, { ...parsed, branch: null, installationId });
   return Response.json({ repo, look: seen } satisfies Payload);
 }
 

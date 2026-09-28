@@ -119,7 +119,7 @@ export function parseRepo(input: string): { owner: string; name: string } | null
  *  OAuth app. */
 export const envToken = () => process.env.GITHUB_TOKEN || process.env.GH_TOKEN || null;
 
-function headers(token: string | null): Record<string, string> {
+export function headers(token: string | null): Record<string, string> {
   const base: Record<string, string> = {
     accept: 'application/vnd.github+json',
     'x-github-api-version': '2022-11-28',
@@ -305,32 +305,6 @@ export function classify(paths: string[], truncated: boolean): TrackedFile[] {
 
 /** A repository in the import list. */
 export type RepoChoice = { fullName: string; private: boolean; pushedAt: string; defaultBranch: string };
-
-/** Every repository the token can see — personal, collaborator and org — most
- *  recently pushed first, which is the order Vercel's import list uses and the
- *  order in which the repo you want is nearly always on top. */
-export async function listRepos(token: string): Promise<{ ok: true; repos: RepoChoice[] } | { ok: false; reason: string }> {
-  const repos: RepoChoice[] = [];
-  // ponytail: stops at 300 (three pages). Enough for a picker with a search box;
-  // follow the Link header to the end if someone has more and misses one.
-  for (let page = 1; page <= 3; page++) {
-    let res: Response;
-    try {
-      res = await get(`/user/repos?per_page=100&sort=pushed&page=${page}`, token);
-    } catch (err) {
-      return { ok: false, reason: `Could not reach GitHub: ${(err as Error).message}` };
-    }
-    if (res.status === 401) return { ok: false, reason: 'GitHub rejected the token — connect again.' };
-    if (res.status === 403 || res.status === 429) return { ok: false, reason: throttled(res, token) };
-    if (!res.ok) return { ok: false, reason: `GitHub answered ${res.status} listing repositories.` };
-    const rows: { full_name: string; private: boolean; pushed_at: string; default_branch: string }[] = await res.json();
-    for (const r of rows) {
-      repos.push({ fullName: r.full_name, private: r.private, pushedAt: r.pushed_at, defaultBranch: r.default_branch });
-    }
-    if (rows.length < 100) break;
-  }
-  return { ok: true, repos };
-}
 
 /** The login a token belongs to — what the panel shows as "connected as". */
 export async function whoami(token: string): Promise<string | null> {

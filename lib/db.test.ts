@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
 
 import {
@@ -102,9 +103,34 @@ test('linkedRepos is keyed the way the report looks it up', () => {
 
 test('a GitHub account is saved once, replaced on reconnect, and forgotten', () => {
   assert.equal(githubAccount(db, LOCAL_USER), null);
-  saveGithubAccount(db, LOCAL_USER, { login: 'one', token: 't1' });
-  saveGithubAccount(db, LOCAL_USER, { login: 'two', token: 't2' });
-  assert.deepEqual(githubAccount(db, LOCAL_USER), { login: 'two', token: 't2' });
+  saveGithubAccount(db, LOCAL_USER, { login: 'one', token: 't1', refreshToken: 'r1', expiresAt: null });
+  const two = { login: 'two', token: 't2', refreshToken: 'r2', expiresAt: '2026-01-01T08:00:00.000Z' };
+  saveGithubAccount(db, LOCAL_USER, two);
+  assert.deepEqual(githubAccount(db, LOCAL_USER), two);
   forgetGithubAccount(db, LOCAL_USER);
   assert.equal(githubAccount(db, LOCAL_USER), null);
+});
+
+test('a store from before the GitHub App is migrated in place', () => {
+  const old = mkdtempSync(join(tmpdir(), 'seo-auditor-db-old-'));
+  after(() => rmSync(old, { recursive: true, force: true }));
+  const raw = new DatabaseSync(join(old, 'app.db'));
+  raw.exec(`
+    CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE repos (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, origin TEXT NOT NULL,
+      owner TEXT NOT NULL, name TEXT NOT NULL, branch TEXT, created_at TEXT NOT NULL, UNIQUE (user_id, origin));
+    CREATE TABLE github_accounts (user_id INTEGER PRIMARY KEY, login TEXT NOT NULL, token TEXT NOT NULL,
+      created_at TEXT NOT NULL);
+    INSERT INTO users VALUES (1, 'local', 'then');
+    INSERT INTO repos (user_id, origin, owner, name, created_at) VALUES (1, 'https://old.example', 'a', 'b', 'then');
+    INSERT INTO github_accounts VALUES (1, 'someone', 'gho_oauth_app_token', 'then');
+  `);
+  raw.close();
+
+  const store = openDb(old);
+  // The link survives, with no installation; the OAuth app's token does not.
+  assert.equal(linkedRepo(store, LOCAL_USER, 'https://old.example')?.installationId, null);
+  assert.equal(githubAccount(store, LOCAL_USER), null);
+  const linked = linkRepo(store, LOCAL_USER, 'https://old.example', { owner: 'a', name: 'b', installationId: 42 });
+  assert.equal(linked.installationId, 42);
 });

@@ -1,6 +1,7 @@
 import { LOCAL_USER, saveGithubAccount } from '@/lib/db';
 import { store } from '@/lib/git-state';
 import { whoami } from '@/lib/github';
+import { exchangeCode } from '@/lib/github-app';
 
 // Where GitHub sends the popup back to. Swap the code for a token, keep it, and
 // tell the report that opened the popup — which is still on screen, holding an
@@ -29,24 +30,25 @@ export async function GET(request: Request) {
   const expected = /(?:^|;\s*)gh_oauth_state=([^;]+)/.exec(request.headers.get('cookie') ?? '')?.[1];
 
   if (params.get('error')) return done(params.get('error_description') ?? 'GitHub declined the connection.', false);
-  if (!code || !state || state !== expected) return done('The sign-in expired or did not start here. Try again.', false);
+  // Installing on an organization you do not own asks its owners instead.
+  if (params.get('setup_action') === 'request') {
+    return done('Sent to the organization’s owners to approve. Once they do, it shows up in the list.', false);
+  }
 
-  const res = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: { accept: 'application/json', 'content-type': 'application/json' },
-    body: JSON.stringify({
-      client_id: process.env.GITHUB_CLIENT_ID,
-      client_secret: process.env.GITHUB_CLIENT_SECRET,
-      code,
-    }),
-  }).catch(() => null);
-  const body = await res?.json().catch(() => null);
-  const token: unknown = body?.access_token;
-  if (typeof token !== 'string') return done(body?.error_description ?? 'GitHub did not hand over a token.', false);
+  if (!code || !state || state !== expected) {
+    // Back from the install screen with nothing we can check the code against.
+    // Sign in the ordinary way instead: the app is authorized by now, so
+    // GitHub answers that without asking again.
+    if (params.has('installation_id')) return Response.redirect(new URL('/api/git/connect', request.url), 302);
+    return done('The sign-in expired or did not start here. Try again.', false);
+  }
 
-  const login = await whoami(token);
+  const got = await exchangeCode(code);
+  if ('error' in got) return done(got.error, false);
+
+  const login = await whoami(got.token);
   if (!login) return done('Got a token, but GitHub would not say whose it is.', false);
 
-  saveGithubAccount(store(), LOCAL_USER, { login, token });
+  saveGithubAccount(store(), LOCAL_USER, { login, ...got });
   return done(login, true);
 }

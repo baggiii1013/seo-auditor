@@ -40,6 +40,10 @@ export type Repo = {
    *  at read time rather than frozen here — so a repo that renames `master` to
    *  `main` does not strand the link. */
   branch: string | null;
+  /** The GitHub App installation that grants access to it. `null` on a link
+   *  made before the app, which still reads — as the env token or anonymously —
+   *  but cannot be written to. */
+  installationId: number | null;
   createdAt: string;
 };
 
@@ -67,17 +71,37 @@ const SCHEMA = `
     owner      TEXT NOT NULL,
     name       TEXT NOT NULL,
     branch     TEXT,
+    installation_id INTEGER,
     created_at TEXT NOT NULL,
     UNIQUE (user_id, origin)
   );
 
   CREATE TABLE IF NOT EXISTS github_accounts (
-    user_id    INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-    login      TEXT NOT NULL,
-    token      TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    login         TEXT NOT NULL,
+    token         TEXT NOT NULL,
+    refresh_token TEXT,
+    expires_at    TEXT,
+    created_at    TEXT NOT NULL
   );
 `;
+
+/** Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS`
+ *  leaves an existing table exactly as it was, so a store from before the
+ *  change needs telling. */
+function migrate(db: DatabaseSync): void {
+  const has = (table: string, column: string) =>
+    db.prepare(`PRAGMA table_info(${table})`).all().some((row) => row.name === column);
+
+  if (!has('repos', 'installation_id')) db.exec('ALTER TABLE repos ADD COLUMN installation_id INTEGER');
+
+  // A token from the OAuth app the GitHub App replaced cannot do anything the
+  // app's can, so the row is dropped rather than carried: connect once more.
+  if (!has('github_accounts', 'refresh_token')) {
+    db.exec('DROP TABLE github_accounts');
+    db.exec(SCHEMA);
+  }
+}
 
 // One connection per root, not per import. `next dev` re-evaluates a module on
 // every edit, and each evaluation opening its own handle is how a long dev
@@ -92,6 +116,7 @@ export function openDb(root: string): DatabaseSync {
   mkdirSync(root, { recursive: true });
   const db = new DatabaseSync(join(root, 'app.db'));
   db.exec(SCHEMA);
+  migrate(db);
   db.prepare('INSERT INTO users (id, name, created_at) VALUES (?, ?, ?) ON CONFLICT(id) DO NOTHING').run(
     LOCAL_USER,
     'local',
@@ -109,6 +134,7 @@ const toRepo = (row: Record<string, unknown>): Repo => ({
   owner: String(row.owner),
   name: String(row.name),
   branch: row.branch == null ? null : String(row.branch),
+  installationId: row.installation_id == null ? null : Number(row.installation_id),
   createdAt: String(row.created_at),
 });
 
@@ -134,14 +160,23 @@ export function linkRepo(
   db: DatabaseSync,
   userId: number,
   origin: string,
-  repo: { owner: string; name: string; branch?: string | null },
+  repo: { owner: string; name: string; branch?: string | null; installationId?: number | null },
 ): Repo {
   db.prepare(
-    `INSERT INTO repos (user_id, origin, owner, name, branch, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)
+    `INSERT INTO repos (user_id, origin, owner, name, branch, installation_id, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT (user_id, origin)
-     DO UPDATE SET owner = excluded.owner, name = excluded.name, branch = excluded.branch`,
-  ).run(userId, siteKey(origin), repo.owner, repo.name, repo.branch ?? null, new Date().toISOString());
+     DO UPDATE SET owner = excluded.owner, name = excluded.name, branch = excluded.branch,
+                   installation_id = excluded.installation_id`,
+  ).run(
+    userId,
+    siteKey(origin),
+    repo.owner,
+    repo.name,
+    repo.branch ?? null,
+    repo.installationId ?? null,
+    new Date().toISOString(),
+  );
 
   return linkedRepo(db, userId, origin)!;
 }
@@ -151,22 +186,41 @@ export function unlinkRepo(db: DatabaseSync, userId: number, origin: string): bo
   return db.prepare('DELETE FROM repos WHERE user_id = ? AND origin = ?').run(userId, siteKey(origin)).changes > 0;
 }
 
-/** The GitHub account a user connected through the OAuth popup.
+/** The GitHub account a user signed in with through the GitHub App.
  *
- *  ponytail: the token sits in plain text in app.db, beside the reports — same
+ *  `token` is the app's user token: it expires after eight hours, and
+ *  `refreshToken` buys a new one — see `userToken()` in lib/git-state.ts.
+ *
+ *  ponytail: the tokens sit in plain text in app.db, beside the reports — same
  *  trust as the machine it runs on. Encrypt at rest the day this is hosted. */
-export type GithubAccount = { login: string; token: string };
+export type GithubAccount = {
+  login: string;
+  token: string;
+  refreshToken: string | null;
+  /** ISO time the token stops working. `null` when the app does not expire them. */
+  expiresAt: string | null;
+};
 
 export function githubAccount(db: DatabaseSync, userId: number): GithubAccount | null {
-  const row = db.prepare('SELECT login, token FROM github_accounts WHERE user_id = ?').get(userId);
-  return row ? { login: String(row.login), token: String(row.token) } : null;
+  const row = db
+    .prepare('SELECT login, token, refresh_token, expires_at FROM github_accounts WHERE user_id = ?')
+    .get(userId);
+  if (!row) return null;
+  return {
+    login: String(row.login),
+    token: String(row.token),
+    refreshToken: row.refresh_token == null ? null : String(row.refresh_token),
+    expiresAt: row.expires_at == null ? null : String(row.expires_at),
+  };
 }
 
 export function saveGithubAccount(db: DatabaseSync, userId: number, account: GithubAccount): void {
   db.prepare(
-    `INSERT INTO github_accounts (user_id, login, token, created_at) VALUES (?, ?, ?, ?)
-     ON CONFLICT (user_id) DO UPDATE SET login = excluded.login, token = excluded.token`,
-  ).run(userId, account.login, account.token, new Date().toISOString());
+    `INSERT INTO github_accounts (user_id, login, token, refresh_token, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT (user_id) DO UPDATE SET login = excluded.login, token = excluded.token,
+       refresh_token = excluded.refresh_token, expires_at = excluded.expires_at`,
+  ).run(userId, account.login, account.token, account.refreshToken, account.expiresAt, new Date().toISOString());
 }
 
 export function forgetGithubAccount(db: DatabaseSync, userId: number): void {
