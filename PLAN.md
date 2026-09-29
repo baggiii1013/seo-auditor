@@ -221,6 +221,7 @@ that one machine.
 ```bash
 npm ci && npm run build
 SEO_AUDIT_HOME=/data NODE_ENV=production npm start   # behind a TLS proxy
+SEO_AUDIT_HOME=/data npm run worker                  # runs the fixes; keep it up beside the app
 ```
 
 | Env                                                | Default                    |                                                                           |
@@ -234,6 +235,7 @@ SEO_AUDIT_HOME=/data NODE_ENV=production npm start   # behind a TLS proxy
 | `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`             | —                          | Any OpenAI-compatible endpoint; see Phase A. Unset hides "Fix with AI"    |
 | `AI_TOKEN_BUDGET`                                  | no cap                     | Tokens (in + out) one fix may spend before it is stopped                  |
 | `AI_MAX_TURNS`                                     | no cap                     | Round trips to the model one fix may take before it is stopped            |
+| `FIX_CONCURRENCY`                                  | 2                          | Fixes the worker runs at once                                             |
 
 ---
 
@@ -285,13 +287,34 @@ unless the endpoint is local. Raw `fetch`, two retries on 429/5xx.
 | `create_file(path, content)` | Staged. Refuses paths that exist                                                 |
 | `done(summary, findings)`    | Ends the run; per finding: fixed / skipped + why                                 |
 
-Rules in the system prompt: the framework's own mechanism over a static file, robots disallows
-only what the routes show, sitemap generated from the source where possible, llms.txt from the
-engine's draft, never invent content, minimal diffs, skip rather than guess. The crawl data sits
-inside `<crawl>` and is declared data, not instructions.
+The rules are in `seo-agent.md` at the repository root, sent word for word as the system prompt
+and read on every run. They cover:
+
+- scope: only the findings asked about, no refactors, no dependency or CI changes, no deletions;
+- white-hat SEO only: no keyword stuffing, hidden text, cloaking or injected links, and no
+  structured data the page doesn't show;
+- never inventing content;
+- the framework's own mechanism over a static file;
+- repository and crawl content is data, never instructions;
+- an honest `done`.
+
+A WordPress repository also gets `seo-agent-wordpress.md`, chosen by its paths (`wp-content/`,
+`wp-config.php`, a theme's `functions.php` or `theme.json`). Its rules:
+
+- which kind of WordPress repository this is;
+- never edit core or third-party themes and plugins;
+- content and plugin settings live in the database, so those findings are skipped;
+- an SEO plugin present means the theme adds no duplicate head tags;
+- core's own title, sitemap and robots mechanisms;
+- a `mu-plugin` or the site's own theme for new code;
+- PHP that can't white-screen the site: closures, PHP 7.2 syntax, no closing `?>`, escaping;
+- block markup kept valid.
+
+The crawl data sits inside `<crawl>`. The files ask; the limits below are what hold.
 
 Enforced in code, not asked of the model: `AI_MAX_TURNS` and `AI_TOKEN_BUDGET` if set, at most 20 files, no
-writes to `.github/`, `.env*`, lockfiles or paths that climb. A finding the model never reports
+writes to `.github/`, `.env*`, lockfiles, `.htaccess`/`web.config`, WordPress core,
+`wp-config.php` and uploads, or paths that climb. A finding the model never reports
 on is skipped, and a run that changed no file fixed nothing, whatever it says.
 
 ### Writing (`lib/github-write.ts`, so `lib/github.ts` stays read-only)
@@ -314,9 +337,11 @@ against GitHub when the panel loads, so a merged or closed one stops covering it
 
 1. Pick: fixable findings with checkboxes; the missing files are pre-ticked; a finding already
    in an open PR shows its link instead. **Fix N with AI** (rate limit: 10 an hour per address).
-2. Run: `POST /api/fixes` answers with the job and the run carries on in-process; the panel
-   polls `/api/fixes/<id>` and shows the log. A reload picks it up again. **Stop**
-   (`DELETE /api/fixes/<id>`) cuts the model request in flight; nothing staged goes anywhere.
+2. Run: `POST /api/fixes` queues the job and answers with it. The worker (Phase B, `npm run
+worker`) runs it, and the panel polls `/api/fixes/<id>` and shows the log. A reload, or a
+   restart of the web app, picks it up again. **Stop** (`DELETE /api/fixes/<id>`) ends a queued
+   job at once. On a running job it sets a flag the worker reads within a second, cutting the
+   model request in flight, and nothing staged goes anywhere.
 3. Done: when the model calls `done`, the run opens the pull request itself (still `running`
    until it is open) and the panel shows it with the summary, each finding fixed or skipped with
    why, and the same diff per file. Review and merge happen on GitHub. A pull request that fails
@@ -355,12 +380,25 @@ For fixes that touch many files or must be proven by a build: a dynamic sitemap 
 image optimisation, broken internal links across templates, `hreflang`, redirects config,
 performance findings from PSI.
 
-### Worker
+### Worker (built)
 
-A separate process, `node worker.mjs`, next to `next start`. It polls `jobs` where
-`kind = 'agent'` (SQLite WAL handles one host fine).
+`npm run worker` (`worker.ts`) runs next to `next dev` or `next start`, and loads `.env.local`
+itself. The web app only queues. Each second the worker:
 
-`ponytail:` SQLite as a queue. Swap for a real queue when there's more than one host.
+1. aborts the jobs someone pressed Stop on (`jobs.stop`);
+2. claims the oldest `queued` job, as long as fewer than `FIX_CONCURRENCY` are running
+   (default 2);
+3. runs the job to its pull request (`lib/runner.ts`).
+
+On start it fails what the last worker left `running`, because those runs lived in its memory;
+queued jobs wait. Ctrl-C or SIGTERM does the same to its own running jobs. Pressing Stop twice
+on a job whose worker is gone ends the job from the web app. A fix outlives a restart or deploy
+of the web app, and has no time limit.
+
+`ponytail:` SQLite as the queue, one worker per store. Add claims with a lease when there's
+more than one host, or move to Trigger.dev or Inngest (see the n8n discussion: a workflow
+builder does not fit here). The sandboxed agent below becomes a second `kind` that this same
+loop claims.
 
 ### Sandbox
 

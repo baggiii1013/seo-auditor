@@ -92,6 +92,8 @@ const SCHEMA = `
 
   -- A fix: the model's run against one linked repository, what it staged, and
   -- the pull request it became. The kind is 'ai' now; Phase B adds 'agent'.
+  -- Queued by the web app, run by the worker (worker.ts); 'stop' is Stop
+  -- pressed, which the worker reads.
   CREATE TABLE IF NOT EXISTS jobs (
     id          TEXT PRIMARY KEY,
     user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -106,13 +108,14 @@ const SCHEMA = `
     tokens_in   INTEGER NOT NULL DEFAULT 0,
     tokens_out  INTEGER NOT NULL DEFAULT 0,
     pr          TEXT,
+    stop        INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     finished_at TEXT
   );
 
-  -- One running fix per user, held by the store rather than by a check that
-  -- two requests could both pass.
-  CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running ON jobs (user_id) WHERE status = 'running';
+  -- One fix per user queued or running, held by the store rather than by a
+  -- check that two requests could both pass.
+  CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_active ON jobs (user_id) WHERE status IN ('queued', 'running');
 
   CREATE TABLE IF NOT EXISTS github_accounts (
     user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -133,6 +136,8 @@ function migrate(db: DatabaseSync): void {
 
   if (!has('repos', 'installation_id')) db.exec('ALTER TABLE repos ADD COLUMN installation_id INTEGER');
   if (!has('users', 'github_id')) db.exec('ALTER TABLE users ADD COLUMN github_id INTEGER');
+  if (!has('jobs', 'stop')) db.exec('ALTER TABLE jobs ADD COLUMN stop INTEGER NOT NULL DEFAULT 0');
+  db.exec('DROP INDEX IF EXISTS jobs_one_running');
   db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_github_id ON users (github_id)');
 
   // A token from the OAuth app the GitHub App replaced cannot do anything the
@@ -380,7 +385,7 @@ export function abandonAudits(db: DatabaseSync, reason: string): number {
   );
 }
 
-export type JobStatus = 'running' | 'done' | 'failed';
+export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
 /** What a fix asked for: the checks picked from one stored audit. */
 export type JobInput = { checks: string[] };
@@ -434,7 +439,7 @@ export function createJob(
 ): void {
   db.prepare(
     `INSERT INTO jobs (id, user_id, repo_id, audit_id, kind, status, input, created_at)
-     VALUES (?, ?, ?, ?, 'ai', 'running', ?, ?)`,
+     VALUES (?, ?, ?, ?, 'ai', 'queued', ?, ?)`,
   ).run(job.id, job.userId, job.repoId, job.auditId, JSON.stringify(job.input), new Date().toISOString());
 }
 
@@ -448,12 +453,38 @@ export function repoJobs(db: DatabaseSync, repoId: number, limit = 20): Job[] {
   return db.prepare('SELECT * FROM jobs WHERE repo_id = ? ORDER BY created_at DESC LIMIT ?').all(repoId, limit).map(toJob);
 }
 
-/** The user's fix still running, if any — one at a time, because each spends
- *  the operator's model budget. */
-export function runningJob(db: DatabaseSync, userId: number): Job | null {
-  const row = db.prepare("SELECT * FROM jobs WHERE user_id = ? AND status = 'running'").get(userId);
+/** The user's fix queued or running, if any — one at a time, because each
+ *  spends the operator's model budget. */
+export function activeJob(db: DatabaseSync, userId: number): Job | null {
+  const row = db.prepare("SELECT * FROM jobs WHERE user_id = ? AND status IN ('queued', 'running')").get(userId);
   return row ? toJob(row) : null;
 }
+
+/** The oldest queued job, now running — the worker's to run. */
+export function claimJob(db: DatabaseSync): Job | null {
+  const row = db
+    .prepare(
+      `UPDATE jobs SET status = 'running'
+       WHERE id = (SELECT id FROM jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1) RETURNING *`,
+    )
+    .get();
+  return row ? toJob(row) : null;
+}
+
+/** Stop pressed. A queued job ends here; a running one is flagged, and its
+ *  worker aborts it within a second. Pressed again on one still running, its
+ *  worker is gone or stuck, so it ends here too. */
+export function stopJob(db: DatabaseSync, id: string, reason: string): void {
+  db.prepare(
+    `UPDATE jobs SET status = 'failed', error = ?, finished_at = ?
+     WHERE id = ? AND (status = 'queued' OR (status = 'running' AND stop = 1))`,
+  ).run(reason, new Date().toISOString(), id);
+  db.prepare("UPDATE jobs SET stop = 1 WHERE id = ? AND status = 'running'").run(id);
+}
+
+/** Running jobs someone pressed Stop on. */
+export const stopsAsked = (db: DatabaseSync): string[] =>
+  db.prepare("SELECT id FROM jobs WHERE status = 'running' AND stop = 1").all().map((row) => String(row.id));
 
 export function logJob(db: DatabaseSync, id: string, log: string[], tokens: { in: number; out: number }): void {
   db.prepare('UPDATE jobs SET log = ?, tokens_in = ?, tokens_out = ? WHERE id = ?').run(
@@ -484,7 +515,8 @@ export function setJobPr(db: DatabaseSync, id: string, pr: PullRequest): void {
   db.prepare('UPDATE jobs SET pr = ? WHERE id = ?').run(JSON.stringify(pr), id);
 }
 
-/** Fixes a previous process was running. The run lived in its memory. */
+/** Fixes a previous worker was running. The run lived in its memory; queued
+ *  ones wait for the next. */
 export function abandonJobs(db: DatabaseSync, reason: string): number {
   return Number(
     db

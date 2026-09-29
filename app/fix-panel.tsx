@@ -8,6 +8,7 @@
 // pull request on a branch of its own (lib/github-write.ts): reviewing and
 // merging it on GitHub is the step a person takes.
 
+import { GitPullRequest } from 'lucide-react';
 import { useEffect, useState, type ReactNode } from 'react';
 
 import { LEVELS } from './types';
@@ -66,6 +67,9 @@ function Diff({ file }: { file: NonNullable<Job['output']>['files'][number] }) {
   );
 }
 
+/** Not finished: waiting for the worker, or with it. */
+const active = (job: Job) => job.status === 'queued' || job.status === 'running';
+
 /** What the run has cost so far, input and output apart — they are priced
  *  apart, and input is most of it. */
 function Tokens({ job }: { job: Job }) {
@@ -104,7 +108,7 @@ export default function FixPanel({
         if (!live) return;
         setJobs(data.jobs);
         const last = data.jobs[0];
-        if (last && (last.status === 'running' || last.auditId === auditId)) setJob(last);
+        if (last && (active(last) || last.auditId === auditId)) setJob(last);
       })
       .catch(() => live && setJobs([]));
     return () => {
@@ -113,7 +117,7 @@ export default function FixPanel({
   }, [origin, auditId]);
 
   // Polled while the model works. A second a step is about as fast as it goes.
-  const runningId = job?.status === 'running' ? job.id : null;
+  const runningId = job && active(job) ? job.id : null;
   useEffect(() => {
     if (!runningId) return;
     const timer = setInterval(async () => {
@@ -121,16 +125,24 @@ export default function FixPanel({
       if (!res?.ok) return;
       const { job: next }: { job: Job } = await res.json();
       setJob(next);
-      if (next.status !== 'running') setJobs((all) => [next, ...(all ?? []).filter((j) => j.id !== next.id)]);
+      if (!active(next)) setJobs((all) => [next, ...(all ?? []).filter((j) => j.id !== next.id)]);
     }, 1500);
     return () => clearInterval(timer);
   }, [runningId]);
 
-  const covered = new Map<string, PullRequest>();
+  // Findings already fixed in a pull request still open, grouped by it:
+  // fixing them again would only open a second one. The report still shows
+  // them until that is merged, deployed and audited again.
+  const covered = new Set<string>();
+  const pending: { job: Job; pr: PullRequest; items: Fixable[] }[] = [];
   for (const j of jobs ?? []) {
     if (j.pr?.state !== 'open') continue;
-    for (const f of j.output?.findings ?? []) if (f.status === 'fixed' && !covered.has(f.id)) covered.set(f.id, j.pr);
+    const fixed = new Set(j.output?.findings.filter((f) => f.status === 'fixed').map((f) => f.id));
+    const mine = items.filter((i) => fixed.has(i.id) && !covered.has(i.id));
+    for (const i of mine) covered.add(i.id);
+    if (mine.length) pending.push({ job: j, pr: j.pr, items: mine });
   }
+  const free = items.filter((i) => !covered.has(i.id));
 
   const start = async () => {
     setBusy(true);
@@ -179,6 +191,13 @@ export default function FixPanel({
 
   if (!canFix) {
     caption = 'Set AI_API_URL, AI_API_KEY and AI_MODEL in .env.local to have a model fix these in a pull request.';
+  } else if (job?.status === 'queued') {
+    caption = 'Waiting for the worker to pick this up. If it stays here, the worker is not running: start it with npm run worker.';
+    actions = (
+      <button onClick={() => fetch(`/api/fixes/${job.id}`, { method: 'DELETE' })} className={ghost}>
+        Cancel
+      </button>
+    );
   } else if (job?.status === 'running') {
     caption =
       'The model is reading the repository and making the changes. When it finishes, it opens a pull request on a new branch.';
@@ -278,54 +297,79 @@ export default function FixPanel({
   } else if (!items.length) {
     caption = 'Nothing in this report is something a model can fix from the source alone.';
   } else {
-    caption =
-      'Pick what to fix. A model reads the repository, makes the changes, and opens a pull request on a new branch for you to review and merge.';
+    const inPrs = items.length - free.length;
+    caption = !free.length
+      ? `Everything here is already fixed in an open pull request. Merge ${pending.length === 1 ? 'it' : 'them'} on GitHub, deploy, and audit again to see the findings pass.`
+      : inPrs
+        ? `${inPrs} ${inPrs === 1 ? 'finding is' : 'findings are'} already fixed in an open pull request, waiting for review. Pick from the rest: a model reads the repository and opens a new pull request for them.`
+        : 'Pick what to fix. A model reads the repository, makes the changes, and opens a pull request on a new branch for you to review and merge.';
     body = (
-      <ul className="mt-4 divide-y divide-line/60 rounded-xl border border-line">
-        {items.map((item) => {
-          const pr = covered.get(item.id);
-          return (
-            <li key={item.id}>
-              <label className={`flex items-start gap-3 px-4 py-2.5 ${pr ? '' : 'cursor-pointer hover:bg-ink/[0.02]'}`}>
-                <input
-                  type="checkbox"
-                  checked={!pr && picked.has(item.id)}
-                  disabled={Boolean(pr)}
-                  onChange={(e) =>
-                    setPicked((now) => {
-                      const next = new Set(now);
-                      if (e.target.checked) next.add(item.id);
-                      else next.delete(item.id);
-                      return next;
-                    })
-                  }
-                  className="mt-1 size-4 shrink-0 accent-[var(--color-brand)]"
-                />
-                <span className={`mt-1.5 size-2 shrink-0 rounded-full ${LEVELS[item.level].dot}`} aria-hidden />
-                <span className="min-w-0 flex-1">
-                  <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-                    <span className="text-sm text-ink/80">{item.title}</span>
-                    <code className="rounded bg-ink/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink/45">{item.id}</code>
+      <>
+        {pending.map(({ job: j, pr, items: its }) => (
+          <section key={pr.number} className="mt-4 overflow-hidden rounded-xl border border-viz-good/30">
+            <header className="flex flex-wrap items-center gap-x-3 gap-y-1 bg-viz-good/10 px-4 py-2.5">
+              <GitPullRequest className="size-4 shrink-0 text-viz-good" aria-hidden />
+              <span className="text-sm font-medium text-ink/90">Pull request #{pr.number}</span>
+              <span className="t-eyebrow rounded-full bg-viz-good/20 px-2 py-0.5 text-viz-good">Open</span>
+              <span className="text-xs text-ink/50">
+                opened {new Date(j.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · waiting
+                for review
+              </span>
+              <a href={pr.url} target="_blank" rel="noreferrer" className={`ml-auto text-sm ${link}`}>
+                Review on GitHub →
+              </a>
+            </header>
+            <ul className="divide-y divide-line/60 border-t border-viz-good/20">
+              {its.map((item) => (
+                <li key={item.id} className="flex items-center gap-3 px-4 py-2">
+                  <StateDot state="passed" label="Fixed in this pull request" />
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink/60">{item.title}</span>
+                  <code className="rounded bg-ink/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink/40">{item.id}</code>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+        {free.length > 0 && pending.length > 0 && <h5 className="t-eyebrow mt-6 text-ink/45">Not fixed yet</h5>}
+        {free.length > 0 && (
+          <ul className={`${pending.length ? 'mt-2' : 'mt-4'} divide-y divide-line/60 rounded-xl border border-line`}>
+            {free.map((item) => (
+              <li key={item.id}>
+                <label className="flex cursor-pointer items-start gap-3 px-4 py-2.5 hover:bg-ink/[0.02]">
+                  <input
+                    type="checkbox"
+                    checked={picked.has(item.id)}
+                    onChange={(e) =>
+                      setPicked((now) => {
+                        const next = new Set(now);
+                        if (e.target.checked) next.add(item.id);
+                        else next.delete(item.id);
+                        return next;
+                      })
+                    }
+                    className="mt-1 size-4 shrink-0 accent-[var(--color-brand)]"
+                  />
+                  <span className={`mt-1.5 size-2 shrink-0 rounded-full ${LEVELS[item.level].dot}`} aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                      <span className="text-sm text-ink/80">{item.title}</span>
+                      <code className="rounded bg-ink/[0.05] px-1.5 py-0.5 font-mono text-[10px] text-ink/45">{item.id}</code>
+                    </span>
+                    <span className="mt-0.5 block text-xs text-ink/50">
+                      {item.kind === 'file'
+                        ? 'A file the site does not serve'
+                        : `On ${item.pages.length} ${item.pages.length === 1 ? 'page' : 'pages'}`}
+                    </span>
                   </span>
-                  <span className="mt-0.5 block text-xs text-ink/50">
-                    {item.kind === 'file'
-                      ? 'A file the site does not serve'
-                      : `On ${item.pages.length} ${item.pages.length === 1 ? 'page' : 'pages'}`}
-                  </span>
-                </span>
-                {pr && (
-                  <a href={pr.url} target="_blank" rel="noreferrer" className={`shrink-0 pt-0.5 text-xs ${link}`}>
-                    In PR #{pr.number} →
-                  </a>
-                )}
-              </label>
-            </li>
-          );
-        })}
-      </ul>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </>
     );
     const count = [...picked].filter((id) => !covered.has(id)).length;
-    actions = (
+    actions = free.length > 0 && (
       <button onClick={start} disabled={busy || !count || jobs === null} className={primary}>
         {busy ? 'Starting…' : count ? `Fix ${count} with AI` : 'Fix with AI'}
       </button>

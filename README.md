@@ -4,6 +4,7 @@ A Next.js front end for [nurkamol/seo-audit](https://github.com/nurkamol/seo-aud
 
 ```bash
 npm run dev            # http://localhost:3000
+npm run worker         # runs "Fix with AI" jobs; leave it up beside the app
 npm start & npm run check   # the one runnable check (SITE=… BASE=… to point it elsewhere)
 ```
 
@@ -33,7 +34,9 @@ our local patches). It is not re-implemented anywhere:
 - **`lib/fixer.ts`, `lib/fixes.ts`, `lib/github-write.ts`** — "Fix with AI" in the Repository
   card: a model on any OpenAI-compatible endpoint (`AI_API_URL`, `AI_API_KEY`, `AI_MODEL`) reads
   the linked repository, stages changes you review as a diff, and they become a pull request on a
-  new branch. See PLAN.md, Phase A.
+  new branch. The web app queues each fix; `worker.ts` (`npm run worker`) runs it via
+  `lib/runner.ts`. The model's instructions and guardrails are in `seo-agent.md`. See PLAN.md,
+  Phases A and B.
 
 Because it runs under Node rather than on Cloudflare, the TLS checks are real.
 

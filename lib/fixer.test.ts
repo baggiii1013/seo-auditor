@@ -4,9 +4,10 @@
 //   node --test lib/fixer.test.ts     (or: npm run test:app)
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 
-import { brief, runFix, workspace } from './fixer.ts';
+import { brief, isWordPress, runFix, workspace } from './fixer.ts';
 
 const repo = { 'app/layout.tsx': 'export const metadata = { title: "Home" };\n', 'package.json': '{}' };
 const ws = () => workspace(Object.keys(repo), async (path) => repo[path as keyof typeof repo] ?? null);
@@ -98,4 +99,55 @@ test('Stop cuts the model request in flight', async () => {
   });
   stop.abort();
   await assert.rejects(run);
+});
+
+test('the model is told seo-agent.md, word for word', async () => {
+  process.env.AI_API_URL = 'http://model.test/v1';
+  process.env.AI_MODEL = 'm';
+  let system = '';
+  const done = { id: 'x', function: { name: 'done', arguments: '{"summary":"s","findings":[]}' } };
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    system = JSON.parse(String(init.body)).messages[0].content;
+    return Response.json({ choices: [{ message: { tool_calls: [done] } }] });
+  }) as typeof fetch;
+  await runFix({
+    origin: 'https://acme.test',
+    repo: 'acme/site',
+    snap: { branch: 'main', sha: 'abc', paths: [], truncated: false },
+    checks: [],
+    drafts: {},
+    read: async () => null,
+    onLog: () => {},
+    stop: new AbortController().signal,
+  });
+  assert.equal(system, readFileSync(new URL('../seo-agent.md', import.meta.url), 'utf8'));
+});
+
+test('WordPress is recognised, gets its own rules, and its core and config are off-limits', async () => {
+  assert.ok(isWordPress(['wp-content/themes/acme/style.css']));
+  assert.ok(isWordPress(['style.css', 'functions.php']), 'a theme on its own');
+  assert.ok(!isWordPress(['app/page.tsx', 'package.json']));
+
+  const ws = workspace(['wp-config.php', 'wp-includes/version.php'], async () => '<?php');
+  for (const path of ['wp-config.php', 'wp-includes/version.php', 'wp-admin/x.php', 'wp-content/uploads/a.jpg', 'web/wp/index.php', '.htaccess']) {
+    assert.match(await ws.tools.create_file({ path, content: 'x' }), /off-limits/, path);
+  }
+  assert.match(await ws.tools.create_file({ path: 'wp-content/mu-plugins/seo-auditor.php', content: '<?php' }), /^Created/);
+
+  let system = '';
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    system = JSON.parse(String(init.body)).messages[0].content;
+    return Response.json({ choices: [{ message: { tool_calls: [{ id: 'x', function: { name: 'done', arguments: '{"summary":"s","findings":[]}' } }] } }] });
+  }) as typeof fetch;
+  await runFix({
+    origin: 'https://acme.test',
+    repo: 'acme/site',
+    snap: { branch: 'main', sha: 'abc', paths: ['wp-content/themes/acme/functions.php'], truncated: false },
+    checks: [],
+    drafts: {},
+    read: async () => null,
+    onLog: () => {},
+    stop: new AbortController().signal,
+  });
+  assert.ok(system.includes(readFileSync(new URL('../seo-agent-wordpress.md', import.meta.url), 'utf8')));
 });

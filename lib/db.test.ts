@@ -18,12 +18,12 @@ import { after, test } from 'node:test';
 import {
   abandonAudits,
   abandonJobs,
+  claimJob,
   createAudit,
   createJob,
   createSession,
   endSession,
   finishAudit,
-  finishJob,
   forgetGithubAccount,
   getAudit,
   getJob,
@@ -33,6 +33,8 @@ import {
   linkedRepos,
   openDb,
   repoJobs,
+  stopJob,
+  stopsAsked,
   saveGithubAccount,
   sessionCookie,
   sessionUser,
@@ -188,15 +190,29 @@ test('a store from before the GitHub App is migrated in place', () => {
   assert.equal(linked.installationId, 42);
 });
 
-test('one fix runs per user at a time, and a restart fails the one running', () => {
+test('one fix per user queued or running; the worker claims, Stop ends, a restart fails the running', () => {
   const fixer = userForGithub(db, 202, 'fixer');
   const repo = linkRepo(db, fixer, 'https://fix.test', { owner: 'acme', name: 'site' });
   const job = (id: string) => ({ id, userId: fixer, repoId: repo.id, auditId: 'a', input: { checks: ['llms-missing'] } });
+  const status = (id: string) => getJob(db, id)?.status;
+
   createJob(db, job('j1'));
-  assert.throws(() => createJob(db, job('j2')), 'a second running fix was let in');
-  finishJob(db, 'j1', { error: 'nope' });
+  assert.equal(status('j1'), 'queued');
+  assert.throws(() => createJob(db, job('j2')), 'a second fix was let in');
+  stopJob(db, 'j1', 'Stopped.');
+  assert.equal(status('j1'), 'failed', 'a queued job ends at once');
+
   createJob(db, job('j2'));
+  assert.equal(claimJob(db)?.id, 'j2');
+  assert.equal(claimJob(db), null, 'claimed twice');
+  stopJob(db, 'j2', 'Stopped.');
+  assert.deepEqual([status('j2'), stopsAsked(db)], ['running', ['j2']], 'a running job is only asked');
+  stopJob(db, 'j2', 'Stopped.');
+  assert.equal(status('j2'), 'failed', 'asked twice, it ends');
+
+  createJob(db, job('j3'));
+  claimJob(db);
   assert.equal(abandonJobs(db, 'restarted'), 1);
-  assert.deepEqual([getJob(db, 'j2')?.status, getJob(db, 'j2')?.error], ['failed', 'restarted']);
-  assert.deepEqual(repoJobs(db, repo.id).map((j) => j.input.checks), [['llms-missing'], ['llms-missing']]);
+  assert.deepEqual([status('j3'), getJob(db, 'j3')?.error], ['failed', 'restarted']);
+  assert.equal(repoJobs(db, repo.id).length, 3);
 });
