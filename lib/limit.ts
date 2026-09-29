@@ -14,6 +14,8 @@ const limiters = {
   audit: new RateLimiterMemory({ keyPrefix: 'audit', points: 10, duration: HOUR }),
   preview: new RateLimiterMemory({ keyPrefix: 'preview', points: 30, duration: HOUR }),
   export: new RateLimiterMemory({ keyPrefix: 'export', points: 60, duration: HOUR }),
+  // Each one spends the operator's model budget.
+  fix: new RateLimiterMemory({ keyPrefix: 'fix', points: 10, duration: HOUR }),
 };
 
 /** The caller's address, as the proxy in front reported it. */
@@ -29,7 +31,7 @@ export async function limit(what: keyof typeof limiters, request: Request): Prom
   } catch (refused) {
     if (!(refused instanceof RateLimiterRes)) throw refused;
     const seconds = Math.ceil(refused.msBeforeNext / 1000);
-    return new Response(`Too many ${what}s from this address. Try again in ${Math.ceil(seconds / 60)} min.`, {
+    return new Response(`Too many ${what === 'fix' ? 'fixes' : `${what}s`} from this address. Try again in ${Math.ceil(seconds / 60)} min.`, {
       status: 429,
       headers: { 'retry-after': String(seconds) },
     });

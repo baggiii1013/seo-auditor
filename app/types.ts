@@ -131,9 +131,11 @@ export type Report = {
   /** Absent, not null, when the run had nothing to score — an unreachable host
    *  answers `done` with `{ meta, findings, causes }` and no `score` key. */
   score?: Score;
-  sitemap?: string;
-  llms?: string;
-  schema?: string;
+  /** The files this site should have had, drafted from the crawl. Each says
+   *  `refused` instead when the crawl was too partial to write one from. */
+  sitemap?: { xml: string | null; urls: string[]; refused: string | null };
+  llms?: { text: string | null; refused: string | null };
+  schema?: { json: string | null; refused: string | null };
 };
 
 export const LEVELS: Record<Level, { label: string; dot: string; text: string; ring: string }> = {

@@ -90,6 +90,30 @@ const SCHEMA = `
     UNIQUE (user_id, origin)
   );
 
+  -- A fix: the model's run against one linked repository, what it staged, and
+  -- the pull request it became. The kind is 'ai' now; Phase B adds 'agent'.
+  CREATE TABLE IF NOT EXISTS jobs (
+    id          TEXT PRIMARY KEY,
+    user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    repo_id     INTEGER NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    audit_id    TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    status      TEXT NOT NULL,
+    input       TEXT NOT NULL,
+    output      TEXT,
+    log         TEXT NOT NULL DEFAULT '[]',
+    error       TEXT,
+    tokens_in   INTEGER NOT NULL DEFAULT 0,
+    tokens_out  INTEGER NOT NULL DEFAULT 0,
+    pr          TEXT,
+    created_at  TEXT NOT NULL,
+    finished_at TEXT
+  );
+
+  -- One running fix per user, held by the store rather than by a check that
+  -- two requests could both pass.
+  CREATE UNIQUE INDEX IF NOT EXISTS jobs_one_running ON jobs (user_id) WHERE status = 'running';
+
   CREATE TABLE IF NOT EXISTS github_accounts (
     user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
     login         TEXT NOT NULL,
@@ -152,6 +176,11 @@ const toRepo = (row: Record<string, unknown>): Repo => ({
 /** The repository linked to `origin`, or `null` when there is none. */
 export function linkedRepo(db: DatabaseSync, userId: number, origin: string): Repo | null {
   const row = db.prepare('SELECT * FROM repos WHERE user_id = ? AND origin = ?').get(userId, siteKey(origin));
+  return row ? toRepo(row) : null;
+}
+
+export function repoById(db: DatabaseSync, id: number): Repo | null {
+  const row = db.prepare('SELECT * FROM repos WHERE id = ?').get(id);
   return row ? toRepo(row) : null;
 }
 
@@ -347,6 +376,119 @@ export function abandonAudits(db: DatabaseSync, reason: string): number {
   return Number(
     db
       .prepare("UPDATE audits SET status = 'failed', error = ?, finished_at = ? WHERE status IN ('queued', 'running')")
+      .run(reason, new Date().toISOString()).changes,
+  );
+}
+
+export type JobStatus = 'running' | 'done' | 'failed';
+
+/** What a fix asked for: the checks picked from one stored audit. */
+export type JobInput = { checks: string[] };
+
+/** What the model left staged, and what it says about each check. `before` is
+ *  `null` for a file it created. */
+export type JobOutput = {
+  base: { branch: string; sha: string };
+  summary: string;
+  findings: { id: string; status: 'fixed' | 'skipped'; why: string }[];
+  files: { path: string; before: string | null; after: string }[];
+};
+
+export type PullRequest = { number: number; url: string; branch: string; state: 'open' | 'closed' | 'merged' };
+
+export type Job = {
+  id: string;
+  userId: number;
+  repoId: number;
+  auditId: string;
+  status: JobStatus;
+  input: JobInput;
+  output: JobOutput | null;
+  log: string[];
+  error: string | null;
+  tokens: { in: number; out: number };
+  pr: PullRequest | null;
+  createdAt: string;
+};
+
+const json = <T>(value: unknown, fallback: T): T => (value == null ? fallback : JSON.parse(String(value)));
+
+const toJob = (row: Record<string, unknown>): Job => ({
+  id: String(row.id),
+  userId: Number(row.user_id),
+  repoId: Number(row.repo_id),
+  auditId: String(row.audit_id),
+  status: String(row.status) as JobStatus,
+  input: json(row.input, { checks: [] }),
+  output: json(row.output, null),
+  log: json(row.log, []),
+  error: row.error == null ? null : String(row.error),
+  tokens: { in: Number(row.tokens_in), out: Number(row.tokens_out) },
+  pr: json(row.pr, null),
+  createdAt: String(row.created_at),
+});
+
+export function createJob(
+  db: DatabaseSync,
+  job: { id: string; userId: number; repoId: number; auditId: string; input: JobInput },
+): void {
+  db.prepare(
+    `INSERT INTO jobs (id, user_id, repo_id, audit_id, kind, status, input, created_at)
+     VALUES (?, ?, ?, ?, 'ai', 'running', ?, ?)`,
+  ).run(job.id, job.userId, job.repoId, job.auditId, JSON.stringify(job.input), new Date().toISOString());
+}
+
+export function getJob(db: DatabaseSync, id: string): Job | null {
+  const row = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
+  return row ? toJob(row) : null;
+}
+
+/** A repository's fixes, newest first. */
+export function repoJobs(db: DatabaseSync, repoId: number, limit = 20): Job[] {
+  return db.prepare('SELECT * FROM jobs WHERE repo_id = ? ORDER BY created_at DESC LIMIT ?').all(repoId, limit).map(toJob);
+}
+
+/** The user's fix still running, if any — one at a time, because each spends
+ *  the operator's model budget. */
+export function runningJob(db: DatabaseSync, userId: number): Job | null {
+  const row = db.prepare("SELECT * FROM jobs WHERE user_id = ? AND status = 'running'").get(userId);
+  return row ? toJob(row) : null;
+}
+
+export function logJob(db: DatabaseSync, id: string, log: string[], tokens: { in: number; out: number }): void {
+  db.prepare('UPDATE jobs SET log = ?, tokens_in = ?, tokens_out = ? WHERE id = ?').run(
+    JSON.stringify(log),
+    tokens.in,
+    tokens.out,
+    id,
+  );
+}
+
+/** `error` beside an `output` is a run that finished whose pull request did
+ *  not open — the changes are kept, so it can be tried again. */
+export function finishJob(
+  db: DatabaseSync,
+  id: string,
+  outcome: { output: JobOutput; error?: string } | { error: string },
+): void {
+  db.prepare('UPDATE jobs SET status = ?, output = ?, error = ?, finished_at = ? WHERE id = ?').run(
+    'output' in outcome ? 'done' : 'failed',
+    'output' in outcome ? JSON.stringify(outcome.output) : null,
+    outcome.error ?? null,
+    new Date().toISOString(),
+    id,
+  );
+}
+
+export function setJobPr(db: DatabaseSync, id: string, pr: PullRequest): void {
+  db.prepare('UPDATE jobs SET pr = ? WHERE id = ?').run(JSON.stringify(pr), id);
+}
+
+/** Fixes a previous process was running. The run lived in its memory. */
+export function abandonJobs(db: DatabaseSync, reason: string): number {
+  return Number(
+    db
+      .prepare("UPDATE jobs SET status = 'failed', error = ?, finished_at = ? WHERE status = 'running'")
       .run(reason, new Date().toISOString()).changes,
   );
 }

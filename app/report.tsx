@@ -456,9 +456,9 @@ export default function ReportView({ report, git, onReset }: { report: Report; g
   };
 
   const generated: [string, string | undefined, string][] = [
-    ['sitemap.xml', report.sitemap, 'application/xml'],
-    ['llms.txt', report.llms, 'text/plain'],
-    ['schema.json', report.schema, 'application/json'],
+    ['sitemap.xml', report.sitemap?.xml ?? undefined, 'application/xml'],
+    ['llms.txt', report.llms?.text ?? undefined, 'text/plain'],
+    ['schema.json', report.schema?.json ?? undefined, 'application/json'],
   ];
 
   return (
@@ -536,7 +536,7 @@ export default function ReportView({ report, git, onReset }: { report: Report; g
 
       {/* Context for the findings below rather than a finding among them, so
           full width here and not in the masonry. */}
-      <GitPanel origin={meta.origin} git={git} />
+      <GitPanel report={report} git={git} />
 
       <Jump score={score.score} grade={score.grade ?? '—'} areas={byArea} />
 

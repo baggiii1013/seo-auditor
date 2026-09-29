@@ -2,10 +2,11 @@
 
 // The repository behind the site, on the report that audits it.
 //
-// Read-only. It answers one question the report could not answer before —
-// "is the thing I am being told to add already in the repo?" — and it answers
-// it in the report's own terms: a present file, a missing file, and a file we
-// could not tell about are three states, not two.
+// It answers one question the report could not answer before — "is the thing
+// I am being told to add already in the repo?" — in the report's own terms: a
+// present file, a missing file, and a file we could not tell about are three
+// states, not two. Below that, fixing the findings in a pull request (see
+// fix-panel.tsx), which is the only thing that ever writes.
 //
 // A card of its own, full width under the score: it is context for the
 // findings below rather than one of them, so it stays out of the masonry.
@@ -13,8 +14,11 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 
+import FixPanel from './fix-panel';
+import type { Report } from './types';
 import { StateDot } from './viz';
 import type { Repo } from '@/lib/db';
+import { fixables } from '@/lib/fixable';
 import type { Installation } from '@/lib/github-app';
 import type { GitState } from '@/lib/git-state';
 import type { FileState, Look, RepoChoice } from '@/lib/github';
@@ -44,7 +48,8 @@ const action =
 const small =
   'shrink-0 rounded-md border border-line bg-white/[0.06] px-2.5 py-1 text-xs font-medium text-ink/70 transition duration-150 ease-out hover:border-ink/25 hover:text-ink active:scale-[0.97] disabled:opacity-40 disabled:active:scale-100';
 
-export default function GitPanel({ origin, git }: { origin: string; git: GitState }) {
+export default function GitPanel({ report, git }: { report: Report; git: GitState }) {
+  const origin = report.meta.origin;
   const router = useRouter();
   // Seeded from the page, so drawing this costs no request. Kept in state so a
   // link or a connect shows at once; `router.refresh()` after each one brings
@@ -213,7 +218,7 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
           <p className="mt-2 text-sm leading-relaxed text-ink/55">
             {repo
               ? 'Checked against the files this report asks for, so you can see which are already there.'
-              : 'Link the GitHub repository behind this site to see whether robots.txt, sitemap.xml and llms.txt are already in it. Read-only — nothing is written back.'}
+              : 'Link the GitHub repository behind this site to see whether robots.txt, sitemap.xml and llms.txt are already in it, and to fix findings in a pull request. Nothing is written until you open one, and never to your default branch.'}
           </p>
         </div>
         {repo ? (
@@ -287,6 +292,12 @@ export default function GitPanel({ origin, git }: { origin: string; git: GitStat
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* Only through the app: a link from before it has no installation
+              to write with, and the note above already says so. */}
+          {seen && repo.installationId && (
+            <FixPanel origin={origin} auditId={report.id} items={fixables(report)} canFix={git.canFix} />
           )}
         </div>
       )}

@@ -80,6 +80,10 @@ async function run(id: string) {
     startAudit(store(), id);
     const search = new URLSearchParams(row.params);
     search.set('format', 'json');
+    // The drafts are built from per-page data that is gone once the report is
+    // written, so they are asked for on every run — the fixer reads them, and
+    // the export buttons offer them.
+    for (const draft of ['sitemap-out', 'llms-out', 'schema-out']) search.set(draft, '1');
     const res = await engine('stream', search);
     if (!res.ok || !res.body) {
       outcome = { error: await res.text() };

@@ -11,12 +11,11 @@ The scan is done. The repo connection works but is read-only, uses an OAuth app 
 
 Phases, in order. Each one ships on its own and is useful without the next.
 
-| Phase | What | Needs AI | Needs infra |
-|---|---|---|---|
-| **0** | GitHub App, connect flow like Vercel's | no | no |
-| **A** | "Open pull request" for missing robots.txt / sitemap.xml / llms.txt | no | no |
-| **B** | AI fixes for page-level findings, over the GitHub API | yes | no |
-| **C** | Sandboxed coding agent + preview re-scan | yes | worker + sandbox |
+| Phase | What                                                                                    | Needs AI | Needs infra      |
+| ----- | --------------------------------------------------------------------------------------- | -------- | ---------------- |
+| **0** | GitHub App, connect flow like Vercel's                                                  | no       | no               |
+| **A** | AI pull requests: the missing robots.txt / sitemap / llms.txt, then page-level findings | yes      | no               |
+| **B** | Sandboxed coding agent + preview re-scan                                                | yes      | worker + sandbox |
 
 ---
 
@@ -28,7 +27,7 @@ Phases, in order. Each one ships on its own and is useful without the next.
    not an OAuth app with a scope.
 2. If the app is not installed anywhere the user can see, **Install** opens
    `github.com/apps/<slug>/installations/new`. The user picks an account or org, then
-   **All repositories** or **Only select repositories**. That choice *is* the permission
+   **All repositories** or **Only select repositories**. That choice _is_ the permission
    boundary.
 3. The import screen has an **account switcher** (every installation the user can access:
    personal + orgs) and a searchable repo list for the selected account, with **Import** per row.
@@ -53,13 +52,13 @@ Phases, in order. Each one ships on its own and is useful without the next.
   on `postMessage`.
 - **Enable Device Flow:** ❌. It's for CLIs, and it's a phishing vector we don't need.
 - **Webhook:** active, URL `<app>/api/git/webhook`, secret set. Locally, point it at a
-  `smee.io` channel, or leave it inactive until Phase C (see below).
+  `smee.io` channel, or leave it inactive until Phase B (see below).
 - **Repository permissions.** Ask now for everything A–C needs, because every permission
   added later makes each installation re-approve:
   - Metadata: read (mandatory)
   - Contents: **read & write** (read trees, push fix branches)
   - Pull requests: **read & write** (open PRs, comment the score change)
-  - Commit statuses: read, Deployments: read (find the preview URL in Phase C)
+  - Commit statuses: read, Deployments: read (find the preview URL in Phase B)
   - Checks: read (same, for hosts that report previews as check runs)
 - **Account permissions:** none needed. Email is optional, and only if sign-in (below) wants it.
 - **Subscribe to events:** Installation, Installation repositories, Pull request,
@@ -83,24 +82,25 @@ stays as the no-login fallback for reading public repos.
 
 ### Two kinds of token
 
-| Token | How we get it | Lives | Used for |
-|---|---|---|---|
-| **User token** (`ghu_…`) | code → `POST /login/oauth/access_token` | 8 h, refresh token 6 months | Who is this, and which installations and repos can they see? (`/user`, `/user/installations`, `/user/installations/{id}/repositories`) |
-| **Installation token** (`ghs_…`) | app JWT → `POST /app/installations/{id}/access_tokens` | 1 h, cached in memory until 5 min before expiry | Everything done *to* a repo: look, write, PR |
+| Token                            | How we get it                                          | Lives                                           | Used for                                                                                                                               |
+| -------------------------------- | ------------------------------------------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| **User token** (`ghu_…`)         | code → `POST /login/oauth/access_token`                | 8 h, refresh token 6 months                     | Who is this, and which installations and repos can they see? (`/user`, `/user/installations`, `/user/installations/{id}/repositories`) |
+| **Installation token** (`ghs_…`) | app JWT → `POST /app/installations/{id}/access_tokens` | 1 h, cached in memory until 5 min before expiry | Everything done _to_ a repo: look, write, PR                                                                                           |
 
 The **app JWT** is RS256, signed with the private key using `node:crypto` (`createSign`),
 with `iss` = the client ID, `iat` = now − 60 s and `exp` = now + 9 min. No dependency needed.
 
 **Security rule:** the browser never supplies an installation ID. Linking reads the repo with the
-*user's* token, which only reaches repos that person can see *and* the app is installed on. Then
+_user's_ token, which only reaches repos that person can see _and_ the app is installed on. Then
 the server asks GitHub as the app (`GET /repos/{o}/{r}/installation`) which installation covers it.
 
 ### Code changes
 
 **New `lib/github-app.ts`**
+
 - `appJwt()`: signs the JWT.
 - `installationToken(installationId, { repositories?, permissions? })`: mints a token and
-  caches it. Scoping to one repo and fewer permissions is used by Phase C.
+  caches it. Scoping to one repo and fewer permissions is used by Phase B.
 - `exchangeCode(code)` and `refreshUserToken(refreshToken)`: user tokens.
 - `userInstallations(userToken)`: `[{ id, account: { login, type, avatarUrl }, repositorySelection }]`.
 - `installationRepos(userToken, installationId)`: replaces `listRepos` (same `RepoChoice`
@@ -110,15 +110,17 @@ the server asks GitHub as the app (`GET /repos/{o}/{r}/installation`) which inst
   verify it; verify a webhook signature, plus one tampered body that must fail.
 
 **`lib/db.ts`**
+
 - `github_accounts` gets `refresh_token TEXT` and `expires_at TEXT` (`github_id` waits for sign-in).
   Tokens from the old OAuth app are useless with the new app, so on schema bump delete the old
   rows and the user reconnects once.
-- `repos` gets `installation_id INTEGER`. A link now remembers *which installation grants
-  access*, so later work (PRs, background jobs) can mint a token without the user present.
+- `repos` gets `installation_id INTEGER`. A link now remembers _which installation grants
+  access_, so later work (PRs, background jobs) can mint a token without the user present.
 - Keep the `ponytail:` note about plain-text tokens. Encrypting at rest becomes mandatory
   before this is hosted for other people.
 
 **`lib/git-state.ts`**
+
 - `gitAuth()` returns the user token (refreshed if expired). It gains
   `tokenFor(repo)`: installation token if `repo.installationId`, else user token, else
   `GITHUB_TOKEN`, else anonymous.
@@ -128,19 +130,19 @@ the server asks GitHub as the app (`GET /repos/{o}/{r}/installation`) which inst
 **Routes (`app/api/git/…`)** — check `node_modules/next/dist/docs/` for route handler
 conventions before writing these (see AGENTS.md).
 
-| Route | Change |
-|---|---|
-| `GET connect` | Redirect to `github.com/login/oauth/authorize?client_id=…&state=…`. GitHub Apps take no `scope`. The same CSRF state cookie as today. |
-| `GET connect?install` | Redirect to `github.com/apps/<slug>/installations/new?state=…`. Used for "Install", "Add GitHub account" and "Adjust permissions". |
-| `GET callback` | Handles both returns: `code` (sign-in, and install when user auth during install is on) and `installation_id` + `setup_action=install\|update` (setup redirect). Exchanges the code, saves the account, and posts `{ type: 'github-connect', ok, login }` to the opener as today. |
-| `GET repos?installation=<id>` | `{ installations, installation, repos }`: the account switcher and one account's repos (the first if none is asked for) in one request. |
-| `POST /api/git` | `look()` as the user (the permission check), then `installationFor()` and save it on the link. Reads after that use the installation token. |
-| `DELETE connect` | Forget the account. Also `DELETE /applications/{client_id}/grant` so it disappears from the user's GitHub authorized apps. |
-| `POST webhook` (new) | Verify the signature. On `installation.deleted` / `suspend`, null `installation_id` on affected links. On `installation_repositories.removed`, the same for those repos. Everything else is `200` and ignored until Phase C. |
+| Route                         | Change                                                                                                                                                                                                                                                                            |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET connect`                 | Redirect to `github.com/login/oauth/authorize?client_id=…&state=…`. GitHub Apps take no `scope`. The same CSRF state cookie as today.                                                                                                                                             |
+| `GET connect?install`         | Redirect to `github.com/apps/<slug>/installations/new?state=…`. Used for "Install", "Add GitHub account" and "Adjust permissions".                                                                                                                                                |
+| `GET callback`                | Handles both returns: `code` (sign-in, and install when user auth during install is on) and `installation_id` + `setup_action=install\|update` (setup redirect). Exchanges the code, saves the account, and posts `{ type: 'github-connect', ok, login }` to the opener as today. |
+| `GET repos?installation=<id>` | `{ installations, installation, repos }`: the account switcher and one account's repos (the first if none is asked for) in one request.                                                                                                                                           |
+| `POST /api/git`               | `look()` as the user (the permission check), then `installationFor()` and save it on the link. Reads after that use the installation token.                                                                                                                                       |
+| `DELETE connect`              | Forget the account. Also `DELETE /applications/{client_id}/grant` so it disappears from the user's GitHub authorized apps.                                                                                                                                                        |
+| `POST webhook` (new)          | Verify the signature. On `installation.deleted` / `suspend`, null `installation_id` on affected links. On `installation_repositories.removed`, the same for those repos. Everything else is `200` and ignored until Phase B.                                                      |
 
 Webhooks can wait. Without them, a removed installation shows up as a 404 when minting a
 token, and the link falls back to "reconnect" with that reason. Build the webhook route in
-Phase 0 only if `smee.io` setup is painless. Otherwise do it in Phase C, which needs it anyway.
+Phase 0 only if `smee.io` setup is painless. Otherwise do it in Phase B, which needs it anyway.
 
 **`app/git-panel.tsx`** (same card, new states)
 
@@ -162,7 +164,7 @@ Phase 0 only if `smee.io` setup is painless. Otherwise do it in Phase C, which n
   `@base-ui/react` is installed. The last item is **+ Add GitHub account** → install popup.
 - The popup opener is shared by connect, install and adjust. Popups that come back through the
   callback report via the same `postMessage`. Refetch installations and repos on that message
-  *or* when the popup closes, because an "adjust" on GitHub may never redirect back.
+  _or_ when the popup closes, because an "adjust" on GitHub may never redirect back.
 - Linked state is unchanged, plus an `installation` fallback. If the link has no installation
   (old link, or app removed), show "Reconnect this repository" instead of silently reading as
   anonymous.
@@ -191,15 +193,15 @@ and a session cookie in that browser; links and tokens are scoped to it.
 The app used to proxy every request under `/api/engine/*` straight into the engine's worker,
 presenting the worker's password on the caller's behalf. Before anything writes to repos:
 
-| Problem | Fix | Where |
-|---|---|---|
-| Catch-all proxy exposed every worker route (report library, compare, export) to anyone | Five narrow routes; nothing else of the worker is reachable | `app/api/preview`, `app/api/audits/**`, `lib/engine.ts` |
-| PageSpeed, Search Console and crt.sh spent the operator's quota for any visitor | Off unless `ALLOW_PSI` / `ALLOW_SEARCH_CONSOLE` / `ALLOW_HOSTS` = 1; the form hides what is off | `lib/engine.ts`, `app/page.tsx` |
-| A crawl could fetch internal addresses (cloud metadata, localhost, LAN) | Every engine fetch asks `refuseInternal()` first; the form's URL is refused up front | `engine/src/http.mjs` (hook), `lib/ssrf.ts` |
-| One shared `LOCAL_USER`: whoever connected GitHub did so for every visitor | Session cookie (`sid`, HttpOnly, SameSite=Lax, Secure in prod, 30 days; only its SHA-256 is stored) created by the GitHub callback; links and tokens per user | `lib/db.ts`, `lib/git-state.ts`, `app/api/git/**` |
-| A crawl lived inside one request: dropped with the browser, unbounded concurrency, report only in the tab | Crawls are jobs: queued, `AUDIT_CONCURRENCY` at a time (default 2), 2 per address, report stored for 7 days; the browser follows `/api/audits/<id>/events` and resumes after a reload | `lib/audits.ts` |
-| Exports rendered any JSON a caller posted | Exports render the stored report by id | `app/api/audits/[id]/export` |
-| No request limits | Per-address: 10 audits, 30 previews, 60 exports an hour | `lib/limit.ts` |
+| Problem                                                                                                   | Fix                                                                                                                                                                                   | Where                                                   |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
+| Catch-all proxy exposed every worker route (report library, compare, export) to anyone                    | Five narrow routes; nothing else of the worker is reachable                                                                                                                           | `app/api/preview`, `app/api/audits/**`, `lib/engine.ts` |
+| PageSpeed, Search Console and crt.sh spent the operator's quota for any visitor                           | Off unless `ALLOW_PSI` / `ALLOW_SEARCH_CONSOLE` / `ALLOW_HOSTS` = 1; the form hides what is off                                                                                       | `lib/engine.ts`, `app/page.tsx`                         |
+| A crawl could fetch internal addresses (cloud metadata, localhost, LAN)                                   | Every engine fetch asks `refuseInternal()` first; the form's URL is refused up front                                                                                                  | `engine/src/http.mjs` (hook), `lib/ssrf.ts`             |
+| One shared `LOCAL_USER`: whoever connected GitHub did so for every visitor                                | Session cookie (`sid`, HttpOnly, SameSite=Lax, Secure in prod, 30 days; only its SHA-256 is stored) created by the GitHub callback; links and tokens per user                         | `lib/db.ts`, `lib/git-state.ts`, `app/api/git/**`       |
+| A crawl lived inside one request: dropped with the browser, unbounded concurrency, report only in the tab | Crawls are jobs: queued, `AUDIT_CONCURRENCY` at a time (default 2), 2 per address, report stored for 7 days; the browser follows `/api/audits/<id>/events` and resumes after a reload | `lib/audits.ts`                                         |
+| Exports rendered any JSON a caller posted                                                                 | Exports render the stored report by id                                                                                                                                                | `app/api/audits/[id]/export`                            |
+| No request limits                                                                                         | Per-address: 10 audits, 30 previews, 60 exports an hour                                                                                                                               | `lib/limit.ts`                                          |
 
 Known ceilings, each marked `ponytail:` in the code:
 
@@ -221,151 +223,133 @@ npm ci && npm run build
 SEO_AUDIT_HOME=/data NODE_ENV=production npm start   # behind a TLS proxy
 ```
 
-| Env | Default | |
-|---|---|---|
-| `SEO_AUDIT_HOME` | `~/.local/share/seo-audit` | Where `app.db` lives — put it on the volume |
-| `AUDIT_CONCURRENCY` | 2 | Crawls at once, for the whole server |
-| `MAX_PAGES` / `MAX_CONCURRENCY` | 150 / 12 | Ceilings on what the form may ask for |
-| `ALLOW_PSI`, `ALLOW_SEARCH_CONSOLE`, `ALLOW_HOSTS` | off | Operator's own quotas; local use only |
-| `ALLOW_PRIVATE_HOSTS` | off | Audit sites on your own network; never on a public deployment |
-| `GITHUB_APP_*` | — | See Phase 0; the callback URL becomes `https://<domain>/api/git/callback` |
+| Env                                                | Default                    |                                                                           |
+| -------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------- |
+| `SEO_AUDIT_HOME`                                   | `~/.local/share/seo-audit` | Where `app.db` lives — put it on the volume                               |
+| `AUDIT_CONCURRENCY`                                | 2                          | Crawls at once, for the whole server                                      |
+| `MAX_PAGES` / `MAX_CONCURRENCY`                    | 150 / 12                   | Ceilings on what the form may ask for                                     |
+| `ALLOW_PSI`, `ALLOW_SEARCH_CONSOLE`, `ALLOW_HOSTS` | off                        | Operator's own quotas; local use only                                     |
+| `ALLOW_PRIVATE_HOSTS`                              | off                        | Audit sites on your own network; never on a public deployment             |
+| `GITHUB_APP_*`                                     | —                          | See Phase 0; the callback URL becomes `https://<domain>/api/git/callback` |
+| `AI_API_URL`, `AI_API_KEY`, `AI_MODEL`             | —                          | Any OpenAI-compatible endpoint; see Phase A. Unset hides "Fix with AI"    |
+| `AI_TOKEN_BUDGET`                                  | no cap                     | Tokens (in + out) one fix may spend before it is stopped                  |
+| `AI_MAX_TURNS`                                     | no cap                     | Round trips to the model one fix may take before it is stopped            |
 
 ---
 
-## Phase A — "Open pull request" for the missing files
+## Phase A — AI pull requests (built; evals and a real-model run pending)
 
-No AI. Uses what the engine already writes: `report.sitemap` (`engine/src/sitemap.mjs`) and
-`report.llms` (`engine/src/llms.mjs`). Both already refuse to write from an incomplete crawl.
-robots.txt needs a small generator.
+One loop for every fix that doesn't need the site's build: the missing robots.txt, sitemap and
+llms.txt first, then page-level findings (title, meta description, canonical, Open Graph /
+Twitter tags, `lang`, image `alt`, JSON-LD, heading structure).
 
-### Where each file goes
+### Why the missing files go through the model, not a template
 
-Decide from the repo tree (already fetched by `look()`) and `package.json`:
+They are the easiest job for the loop, because it only creates files and never edits them. They
+still need judgment a template doesn't have:
 
-| Framework (detected by) | robots | sitemap | llms.txt |
-|---|---|---|---|
-| Next.js app router (`next` + `app/`) | `app/robots.ts` | `public/sitemap.xml`* | `public/llms.txt` |
-| Next.js pages router / Vite / Astro / Nuxt / Remix / CRA | `public/…` | `public/…` | `public/…` |
-| Hugo (`config.toml` / `hugo.toml`) | `static/…` | `static/…` | `static/…` |
-| Jekyll (`_config.yml`), Gatsby (`static/`), plain HTML | root / `static/` | same | same |
-| Unknown | don't guess: say "couldn't tell where this site serves files from" |
+| File       | A template writes                               | The model, reading the repo, writes                                                                                                                 |
+| ---------- | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| robots.txt | `Allow: /` for everything                       | Disallows what the routes show shouldn't be crawled (`/api`, `/admin`, drafts, search pages), in the framework's own route (`app/robots.ts`) if any |
+| sitemap    | A static snapshot of one crawl, stale next post | A dynamic `app/sitemap.ts` (or the framework's plugin) built from the routes or content source; the crawl's URL list checks nothing is missed       |
+| llms.txt   | The engine's draft, as is                       | The draft as raw material: sections that match what the site is, pages that don't belong dropped                                                    |
 
-\* A static sitemap from a crawl goes stale. The PR body says so, and a dynamic `app/sitemap.ts`
-is a Phase B/C fix.
+Placement is not a hard-coded framework table either: the model reads `package.json` and the tree.
+If it can't tell where the site serves files from, it skips the file and says so.
 
-This is a pure function, `placement(paths, packageJson) → { robots, sitemap, llms } | null`, in
-`lib/placement.ts`, with one test covering the table above.
-
-**robots.txt content:** `User-agent: *` + `Allow: /` + `Sitemap: <origin>/sitemap.xml`. Only
-offered when the crawl found no robots.txt. Never overwrite an existing one.
-
-### Writing (new `lib/github-write.ts`, so `lib/github.ts` stays read-only)
-
-`openPullRequest({ token, owner, name, base, files: [{ path, content }], title, body })`:
-
-1. `GET /repos/{o}/{r}/git/ref/heads/{base}` → base commit SHA.
-2. `POST /repos/{o}/{r}/git/trees` with `base_tree` and inline `content`, which skips
-   separate blobs.
-3. `POST /repos/{o}/{r}/git/commits` with the parent set to the base SHA.
-4. `POST /repos/{o}/{r}/git/refs` for `refs/heads/seo-auditor/<yyyy-mm-dd>-<short>`. On
-   `422 already exists`, add a suffix.
-5. `POST /repos/{o}/{r}/pulls`, draft = false, maintainer_can_modify = true.
-
-Each step's failure maps to a human reason, the way `look()` does: branch protection, the app
-lacking access to that repo, a stale base. Refuse if any target path already exists in the
-tree, because this phase only adds files.
-
-### Storage
-
-New `pull_requests` table: `id, user_id, repo_id, number, url, branch, kind ('files'|'ai'|'agent'),
-findings JSON, state ('open'|'merged'|'closed'), score_before, created_at`. Used for "a PR is
-already open for this" and for Phase C's score comment.
-
-### UI
-
-- In the linked Repository card, missing files get a checkbox, pre-ticked.
-- **Preview**: a read-only view of each file's path and content. The user sees exactly what
-  will be committed.
-- **Open pull request** (primary button) → a spinner → "Pull request #12 opened →" link.
-- If an open PR already exists for these files, show its link instead of the button.
-- Caption: "Read-only until you ask for a pull request. We never push to your default branch."
-
-### PR body
-
-A template built from the report: what was missing, the finding each file fixes, the score
-before, where the file was placed and why, and a stale-sitemap note if relevant. It ends with
-the audit link.
-
-### Done when
-
-Against a throwaway repo: missing files → one PR with correct paths per framework, the bot as
-author, nothing on the default branch. The second click shows the existing PR.
-
----
-
-## Phase B — AI fixes for page-level findings
-
-For findings fixable in one or a few template files, without a build: title, meta description,
-canonical, Open Graph / Twitter tags, `lang`, image `alt`, JSON-LD, heading structure, and a
-dynamic sitemap/robots route.
+The engine's `report.sitemap` (`engine/src/sitemap.mjs`) and `report.llms`
+(`engine/src/llms.mjs`) go into the prompt as the facts: which URLs exist and what each page
+says about itself. Both refuse to draft from an incomplete crawl. The model then gets no draft,
+and must skip rather than invent.
 
 ### Which findings
 
-An allowlist of check IDs in `lib/fixable.ts` (checks come from `engine/src/checks.mjs`), each
-tagged `files` (A), `ai` (B) or `agent` (C). The UI only offers AI fixes for `ai` checks. Each
-finding already has `fix`, evidence and pages. That, not the whole report, is the prompt.
+`FIXABLE` in `lib/fixable.ts`: the check ids a model may fix from source, each `file` (the three
+missing documents, pre-ticked) or `page` (a tag in a template). Everything else waits for Phase B.
+The prompt is the picked checks' title, the engine's detail and their pages, not the whole report.
 
-### The loop (new `lib/fixer.ts`)
+Audits now always ask the engine for its sitemap, llms.txt and schema drafts (`lib/audits.ts`),
+so every stored report carries them. Before, the app never asked and the drafts never existed.
 
-Claude Messages API with tool use. Raw `fetch` to `/v1/messages` to match the zero-dependency
-style; the `@anthropic-ai/sdk` tool runner is the alternative if the loop grows. Model:
-`claude-sonnet-5` by default. Set `ANTHROPIC_API_KEY` in env.
+### The loop (`lib/fixer.ts`)
 
-Tools we implement (all against the GitHub API with the installation token, and nothing
-executes):
+Any OpenAI-compatible `/chat/completions` endpoint with tool calling: `AI_API_URL` (the base, e.g.
+`https://openrouter.ai/api/v1`, or the full `/chat/completions` URL), `AI_MODEL`, and `AI_API_KEY`
+unless the endpoint is local. Raw `fetch`, two retries on 429/5xx.
 
-| Tool | Does |
-|---|---|
-| `list_files(prefix)` | From the tree `look()` already fetched |
-| `read_file(path)` | `GET /repos/{o}/{r}/contents/{path}`. Capped at 100 KB |
-| `edit_file(path, old, new)` | Exact-string replace, **staged in memory**. Fails if `old` is not unique |
-| `create_file(path, content)` | Staged. Refuses paths that exist |
-| `done(summary, per_finding)` | Ends the loop; per finding: fixed / skipped + why |
+| Tool                         | Does                                                                             |
+| ---------------------------- | -------------------------------------------------------------------------------- |
+| `list_files(prefix)`         | The tree at the pinned commit, plus staged files                                 |
+| `read_file(path)`            | The staged version if any, else `contents/{path}?ref=<sha>`. Refused over 100 KB |
+| `edit_file(path, old, new)`  | Exact-string replace, **staged in memory**. Fails unless `old` appears once      |
+| `create_file(path, content)` | Staged. Refuses paths that exist                                                 |
+| `done(summary, findings)`    | Ends the run; per finding: fixed / skipped + why                                 |
 
-System prompt: the framework (from Phase A's detection), a URL → source file hint (e.g. Next's
-`/blog/x` → `app/blog/[slug]/page.tsx`), the selected findings, and the rules: minimal
-diffs, match the code style, never invent content (descriptions come from the page's own text,
-as `llms.mjs` does), skip rather than guess.
+Rules in the system prompt: the framework's own mechanism over a static file, robots disallows
+only what the routes show, sitemap generated from the source where possible, llms.txt from the
+engine's draft, never invent content, minimal diffs, skip rather than guess. The crawl data sits
+inside `<crawl>` and is declared data, not instructions.
 
-Limits: 25 turns, a token budget per run, a denylist of paths (`.github/`, lockfiles, `.env*`),
-and at most 20 files changed.
+Enforced in code, not asked of the model: `AI_MAX_TURNS` and `AI_TOKEN_BUDGET` if set, at most 20 files, no
+writes to `.github/`, `.env*`, lockfiles or paths that climb. A finding the model never reports
+on is skipped, and a run that changed no file fixed nothing, whatever it says.
 
-### Flow
+### Writing (`lib/github-write.ts`, so `lib/github.ts` stays read-only)
 
-1. The user ticks AI-fixable findings → **Fix with AI**.
-2. The run is a row in a `jobs` table (`id, user_id, repo_id, kind, status, input JSON,
-   output JSON, log, tokens_in, tokens_out, created_at, finished_at`). The UI polls it.
-   Run it in-process after responding; check `after()` in the local Next docs first. It is
-   fine for self-hosted `next start`; serverless time limits are why Phase C moves it to a worker.
-3. The result is a **diff view** per file, plus the model's per-finding summary.
-4. The user approves → Phase A's `openPullRequest()` with the staged files (it now also accepts
-   modifications: `content` for existing paths with base_tree). The PR body lists fixed and
-   skipped findings with reasons.
+`openPullRequest()` commits onto the SHA the model read (so a moved base shows as a conflict in
+the PR rather than silently overwriting it): one tree with inline content, one commit, a ref
+`seo-auditor/<yyyy-mm-dd>-<job id>`, then the pull request. The branch is the job's own, so a
+retry force-moves it and finds the PR already open instead of opening a second. Failures map to
+what to do: missing Contents / Pull requests write permission, the app losing the repo, an empty
+repo.
+
+### Storage
+
+One `jobs` table: the input checks, the model's output (base SHA, summary, per-finding verdicts,
+each file's before and after), the log, tokens in and out, and the pull request (`number, url,
+branch, state`). A partial unique index allows one running fix per user. Open PRs are re-checked
+against GitHub when the panel loads, so a merged or closed one stops covering its findings.
+
+### Flow (`app/fix-panel.tsx`, inside the linked Repository card)
+
+1. Pick: fixable findings with checkboxes; the missing files are pre-ticked; a finding already
+   in an open PR shows its link instead. **Fix N with AI** (rate limit: 10 an hour per address).
+2. Run: `POST /api/fixes` answers with the job and the run carries on in-process; the panel
+   polls `/api/fixes/<id>` and shows the log. A reload picks it up again. **Stop**
+   (`DELETE /api/fixes/<id>`) cuts the model request in flight; nothing staged goes anywhere.
+3. Done: when the model calls `done`, the run opens the pull request itself (still `running`
+   until it is open) and the panel shows it with the summary, each finding fixed or skipped with
+   why, and the same diff per file. Review and merge happen on GitHub. A pull request that fails
+   to open keeps the changes; **Try again** is `POST /api/fixes/<id>/pull`. A run that changed no
+   file opens nothing.
+
+The PR body lists fixed and skipped findings with reasons, the files, the score of the audit it
+came from, and says it was written by a model and never built.
 
 ### Quality
 
-`evals/` holds three small fixture repos (Next app router, Astro, plain HTML) with seeded SEO
-faults and expected outcomes. `npm run eval` runs the fixer against them and diffs the results.
-Run it before any prompt or model change.
+Not built yet: `evals/` with three fixture repos (Next app router, Astro, plain HTML) with seeded
+faults, one with no robots/sitemap/llms and an `/api` route that must end up disallowed, and
+`npm run eval` to run the fixer against them. Run it before any prompt or model change.
+
+Tested without a model: the tools and their refusals (`lib/fixer.test.ts`), the PR write path
+against a stubbed GitHub (`lib/github-write.test.ts`), the diff (`lib/diff.test.ts`), and one
+running fix per user (`lib/db.test.ts`). End to end against a scripted fake model, a real audit
+and real GitHub reads: pick → run → review → refusals.
 
 ### Done when
 
-On the Next fixture: missing meta description + missing canonical → one PR editing the right
-`layout.tsx` / `page.tsx`, with the content taken from the page, and cost logged in `jobs`.
+On the Next fixture:
+
+- Missing files → one PR with `app/robots.ts` (`/api` disallowed), `app/sitemap.ts` and
+  `public/llms.txt` whose text comes from the pages. The bot is the author, and nothing lands on
+  the default branch. The second click shows the existing PR.
+- Missing meta description + canonical → one PR editing the right `layout.tsx` / `page.tsx`.
+- Cost is logged in `jobs` (`tokens_in`, `tokens_out`).
 
 ---
 
-## Phase C — Sandboxed coding agent + preview re-scan
+## Phase B — Sandboxed coding agent + preview re-scan
 
 For fixes that touch many files or must be proven by a build: a dynamic sitemap from a CMS,
 image optimisation, broken internal links across templates, `hreflang`, redirects config,
@@ -392,7 +376,7 @@ we run, so the API key is never inside the sandbox.
 2. `git clone https://x-access-token:<token>@github.com/o/r`, then detect the package manager
    and install.
 3. Run the **Claude Agent SDK** (`@anthropic-ai/claude-agent-sdk`, `query()`) with the same
-   prompt as B plus the findings. Tools: Read, Edit, Write, Glob, Grep, Bash (the Bash
+   prompt as A plus the findings. Tools: Read, Edit, Write, Glob, Grep, Bash (the Bash
    allowlist is the package manager's install / build / lint / test), with `maxTurns`.
 4. **We** run build + lint after the agent finishes. We don't trust its claim. Failure means
    no PR, and the log is shown.
@@ -415,8 +399,8 @@ egress allowlist, and a human-approved PR as the only output.
 - `pull_request.closed` with `merged` → re-scan production, and mark the findings resolved in
   the site's history.
 
-Phase B/C PRs get the re-scan too. It is the same webhook, keyed by the branch in
-`pull_requests`.
+Phase A and B PRs get the re-scan too. It is the same webhook, keyed by the branch stored on the
+job's `pr`.
 
 ### Done when
 

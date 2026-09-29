@@ -2,6 +2,7 @@ import { cookies } from 'next/headers';
 
 import { SESSION_COOKIE, forgetGithubAccount, githubAccount, linkedRepos, saveGithubAccount, sessionUser, type Repo } from './db';
 import { envToken } from './github';
+import { aiConfigured } from './fixer';
 import { appConfigured, installationToken, refreshUserToken } from './github-app';
 import { store } from './store';
 
@@ -16,7 +17,8 @@ import { store } from './store';
  *  crosses to the browser. */
 export type GitAccount = { login: string } | null;
 
-export type GitState = { account: GitAccount; canConnect: boolean; links: Record<string, Repo> };
+/** `canFix`: a model is set up, so a linked repository can be fixed. */
+export type GitState = { account: GitAccount; canConnect: boolean; canFix: boolean; links: Record<string, Repo> };
 
 /** The signed-in user behind this request's cookie, or `null` for a visitor
  *  who never continued with GitHub. */
@@ -72,16 +74,18 @@ export async function tokenFor(repo: Repo | null): Promise<{ token: string | nul
  *  store must cost the git panel, not the auditor. */
 export async function gitState(): Promise<GitState> {
   const canConnect = appConfigured();
+  const canFix = aiConfigured();
   try {
     const user = await currentUser();
     const saved = user ? githubAccount(store(), user) : null;
     return {
       account: saved ? { login: saved.login } : null,
       canConnect,
+      canFix,
       links: user ? linkedRepos(store(), user) : {},
     };
   } catch (err) {
     console.error('git state unavailable:', err);
-    return { account: null, canConnect: false, links: {} };
+    return { account: null, canConnect: false, canFix: false, links: {} };
   }
 }

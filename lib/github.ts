@@ -313,3 +313,50 @@ export async function whoami(token: string): Promise<{ id: number; login: string
   const user = await res.json().catch(() => null);
   return typeof user?.login === 'string' && typeof user?.id === 'number' ? { id: user.id, login: user.login } : null;
 }
+
+/** The commit a fix starts from, and every file in it. Pinned by SHA so every
+ *  read in one fix sees the same tree, and the pull request is based on the
+ *  commit the model actually read. */
+export type Snapshot = { branch: string; sha: string; paths: string[]; truncated: boolean };
+
+export async function snapshot(
+  owner: string,
+  name: string,
+  branch: string | null,
+  token: string,
+): Promise<{ ok: true; value: Snapshot } | { ok: false; reason: string }> {
+  const json = async (path: string) => {
+    const res = await get(path, token).catch(() => null);
+    if (!res) throw new Error('Could not reach GitHub.');
+    if (res.status === 403 || res.status === 429) throw new Error(throttled(res, token));
+    if (!res.ok) throw new Error(`GitHub answered ${res.status} reading ${owner}/${name}.`);
+    return res.json();
+  };
+  try {
+    const ref = branch || (await json(`/repos/${owner}/${name}`)).default_branch;
+    const head = await json(`/repos/${owner}/${name}/git/ref/heads/${encodeURIComponent(ref)}`);
+    const sha = String(head.object.sha);
+    const tree = await json(`/repos/${owner}/${name}/git/trees/${sha}?recursive=1`);
+    const paths = (tree.tree as { path: string; type: string }[]).filter((e) => e.type === 'blob').map((e) => e.path);
+    return { ok: true, value: { branch: ref, sha, paths, truncated: Boolean(tree.truncated) } };
+  } catch (err) {
+    return { ok: false, reason: (err as Error).message };
+  }
+}
+
+/** One file's text at `sha`, or `null` when there is no such file. */
+export async function readFile(
+  owner: string,
+  name: string,
+  sha: string,
+  path: string,
+  token: string,
+): Promise<string | null> {
+  const res = await fetch(`${API}/repos/${owner}/${name}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${sha}`, {
+    headers: { ...headers(token), accept: 'application/vnd.github.raw+json' },
+    cache: 'no-store',
+  });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`GitHub answered ${res.status} reading ${path}.`);
+  return res.text();
+}

@@ -30,6 +30,10 @@ our local patches). It is not re-implemented anywhere:
 - **`app/report.tsx`** — draws the report from the payload, and asks
   `/api/audits/<id>/export` for every saved file. It formats nothing itself, so a report saved
   here and one saved by the CLI are the same document.
+- **`lib/fixer.ts`, `lib/fixes.ts`, `lib/github-write.ts`** — "Fix with AI" in the Repository
+  card: a model on any OpenAI-compatible endpoint (`AI_API_URL`, `AI_API_KEY`, `AI_MODEL`) reads
+  the linked repository, stages changes you review as a diff, and they become a pull request on a
+  new branch. See PLAN.md, Phase A.
 
 Because it runs under Node rather than on Cloudflare, the TLS checks are real.
 

@@ -17,17 +17,22 @@ import { after, test } from 'node:test';
 
 import {
   abandonAudits,
+  abandonJobs,
   createAudit,
+  createJob,
   createSession,
   endSession,
   finishAudit,
+  finishJob,
   forgetGithubAccount,
   getAudit,
+  getJob,
   githubAccount,
   linkRepo,
   linkedRepo,
   linkedRepos,
   openDb,
+  repoJobs,
   saveGithubAccount,
   sessionCookie,
   sessionUser,
@@ -181,4 +186,17 @@ test('a store from before the GitHub App is migrated in place', () => {
   assert.equal(githubAccount(store, 1), null);
   const linked = linkRepo(store, 1, 'https://old.example', { owner: 'a', name: 'b', installationId: 42 });
   assert.equal(linked.installationId, 42);
+});
+
+test('one fix runs per user at a time, and a restart fails the one running', () => {
+  const fixer = userForGithub(db, 202, 'fixer');
+  const repo = linkRepo(db, fixer, 'https://fix.test', { owner: 'acme', name: 'site' });
+  const job = (id: string) => ({ id, userId: fixer, repoId: repo.id, auditId: 'a', input: { checks: ['llms-missing'] } });
+  createJob(db, job('j1'));
+  assert.throws(() => createJob(db, job('j2')), 'a second running fix was let in');
+  finishJob(db, 'j1', { error: 'nope' });
+  createJob(db, job('j2'));
+  assert.equal(abandonJobs(db, 'restarted'), 1);
+  assert.deepEqual([getJob(db, 'j2')?.status, getJob(db, 'j2')?.error], ['failed', 'restarted']);
+  assert.deepEqual(repoJobs(db, repo.id).map((j) => j.input.checks), [['llms-missing'], ['llms-missing']]);
 });
