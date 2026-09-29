@@ -1,9 +1,11 @@
-// A model fixing findings in a repository it can read but not run.
+// A model fixing findings in a repository it can read, and with a sandbox run.
 //
-// It gets five tools and nothing else: list, read, edit, create, done. Edits
-// are staged here in memory, nothing executes, and the only way anything
-// leaves is a pull request a person opens from the diff — so a repository or
-// a crawled page telling the model to do something else has nowhere to do it.
+// It gets five tools: list, read, edit, create, done. Edits are staged here in
+// memory, and the only way anything leaves is a pull request a person opens
+// from the diff — so a repository or a crawled page telling the model to do
+// something else has nowhere to do it. With a sandbox (lib/sandbox.ts) it also
+// gets `run`: a command in an offline container holding the checkout, whose
+// output is all that comes back.
 //
 // Any OpenAI-compatible `/chat/completions` endpoint: AI_API_URL, AI_MODEL and
 // (unless it is a local one) AI_API_KEY. Raw `fetch`, like everything else
@@ -151,15 +153,23 @@ const TOOLS = [
   ),
 ];
 
+const RUN = fn(
+  'run',
+  "Run a shell command in an offline sandbox: the repository at its commit with your staged changes laid over it, dependencies installed. Use it for the site's build, lint or tests, and `php -l`. What a command writes is thrown away; only edit_file and create_file change anything.",
+  { command: str('A shell command, run from the repository root') },
+  ['command'],
+);
+
 // The model's instructions live in seo-agent.md at the repository root, read
 // on every run so an edit there takes effect without a restart. It asks; the
 // limits above and the tools' refusals are what hold.
 // A WordPress repository also gets seo-agent-wordpress.md: its PHP takes the
 // whole site down on one mistake, and much of what a crawl sees lives in the
 // database rather than the repository.
+// Each URL spelled out whole: Turbopack cannot follow a built one.
 const instructions = (wordpress: boolean) =>
-  ['seo-agent.md', ...(wordpress ? ['seo-agent-wordpress.md'] : [])]
-    .map((file) => readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'))
+  [new URL('../seo-agent.md', import.meta.url), ...(wordpress ? [new URL('../seo-agent-wordpress.md', import.meta.url)] : [])]
+    .map((url) => readFileSync(url, 'utf8'))
     .join('\n\n');
 
 /** A WordPress site, Bedrock project or theme, told by its tree. A plugin on
@@ -205,13 +215,13 @@ export function brief(o: {
 type Message = Record<string, unknown>;
 type ToolCall = { id: string; function: { name: string; arguments: string } };
 
-async function chat(messages: Message[], stop: AbortSignal) {
+async function chat(messages: Message[], tools: object[], stop: AbortSignal) {
   const c = config();
   for (let attempt = 0; ; attempt++) {
     const res = await fetch(c.url, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...(c.key ? { authorization: `Bearer ${c.key}` } : {}) },
-      body: JSON.stringify({ model: c.model, messages, tools: TOOLS, tool_choice: 'auto' }),
+      body: JSON.stringify({ model: c.model, messages, tools, tool_choice: 'auto' }),
       signal: AbortSignal.any([stop, AbortSignal.timeout(180_000)]),
     });
     if (res.ok) {
@@ -240,6 +250,8 @@ export async function runFix(o: {
   onLog: (line: string, tokens: { in: number; out: number }) => void;
   /** Aborted by Stop: the request in flight is cut and nothing more is asked. */
   stop: AbortSignal;
+  /** The sandbox's `run`, when there is one: a command on the staged changes. */
+  run?: (command: string, files: JobOutput['files']) => Promise<string>;
 }): Promise<JobOutput> {
   const ws = workspace(o.snap.paths, o.read);
   const tokens = { in: 0, out: 0 };
@@ -251,7 +263,7 @@ export async function runFix(o: {
   ];
 
   for (let turn = 0; turn < MAX_TURNS; turn++) {
-    const res = await chat(messages, o.stop);
+    const res = await chat(messages, o.run ? [...TOOLS, RUN] : TOOLS, o.stop);
     tokens.in += res.usage?.prompt_tokens ?? 0;
     tokens.out += res.usage?.completion_tokens ?? 0;
     if (tokens.in + tokens.out > TOKEN_BUDGET) throw new Error(`Stopped at the budget of ${TOKEN_BUDGET.toLocaleString()} tokens.`);
@@ -291,12 +303,19 @@ export async function runFix(o: {
         o.onLog('done', tokens);
         return { base: { branch: o.snap.branch, sha: o.snap.sha }, summary: String(args.summary ?? ''), findings, files };
       }
-      const tool = ws.tools[name];
+      const tool = name === 'run' && o.run ? () => o.run!(String(args.command ?? ''), ws.changes()) : ws.tools[name];
       const result = tool ? await tool(args as Record<string, string>) : `There is no tool called ${name}.`;
       // A read's result is the file, so the log names it instead; an edit's
-      // result is already the sentence worth showing, refusals included.
+      // result is already the sentence worth showing, refusals included; a
+      // command's first line is its exit code.
       o.onLog(
-        name === 'list_files' ? `listed ${args.prefix || 'the repository'}` : name === 'read_file' ? `read ${args.path}` : result,
+        name === 'list_files'
+          ? `listed ${args.prefix || 'the repository'}`
+          : name === 'read_file'
+            ? `read ${args.path}`
+            : name === 'run'
+              ? `ran ${args.command}: ${result.split('\n')[0]}`
+              : result,
         tokens,
       );
       messages.push({ role: 'tool', tool_call_id: call.id, content: result });

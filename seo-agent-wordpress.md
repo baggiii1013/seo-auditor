@@ -56,7 +56,7 @@ Append to the end of `functions.php`. Do not restructure what is there.
 
 ## PHP that cannot take the site down
 
-You cannot run PHP or `php -l`, so write defensively, then read the file again after each edit to check the code around your change:
+Write defensively, then read the file again after each edit to check the code around your change. If you have `run`, also `php -l` every PHP file you changed. It only catches syntax errors, not a call to a function that does not exist:
 
 - **Hooks with closures:** `add_action( 'wp_head', function () { ... } );`. A named function risks "cannot redeclare", a fatal error. If you must name one, prefix it `seo_auditor_` and wrap it in `if ( ! function_exists( ... ) )`.
 - **Old PHP syntax,** unless `composer.json`, `style.css` or `readme.txt` states a higher "Requires PHP". Write PHP 7.2: no arrow functions (`fn`), no `match`, no named arguments, no nullsafe `?->`, no typed properties, no union types.

@@ -397,7 +397,13 @@ export type JobOutput = {
   summary: string;
   findings: { id: string; status: 'fixed' | 'skipped'; why: string }[];
   files: { path: string; before: string | null; after: string }[];
+  /** Run in the sandbox after the model finished, when there is one. */
+  checks?: Check[];
 };
+
+/** One command we ran on the changes. `before` is whether it passed without
+ *  them, asked only when it failed with them. */
+export type Check = { command: string; ok: boolean; before?: boolean; tail: string };
 
 export type PullRequest = { number: number; url: string; branch: string; state: 'open' | 'closed' | 'merged' };
 

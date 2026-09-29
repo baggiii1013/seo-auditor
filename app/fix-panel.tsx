@@ -245,11 +245,16 @@ export default function FixPanel({
     );
   } else if (job?.output) {
     const out = job.output;
+    // A check that fails with the changes and passed without them held the
+    // pull request back (lib/sandbox.ts, `broke`).
+    const broken = out.checks?.some((c) => !c.ok && c.before !== false);
     caption = job.pr
       ? 'Opened on a new branch — review and merge it on GitHub. The next audit after it is deployed shows what it changed.'
-      : out.files.length
-        ? 'The changes are ready, but the pull request did not open. Nothing reached your default branch.'
-        : 'The model changed nothing, so there is no pull request. Its reasons are below.';
+      : broken
+        ? 'A check failed with these changes, so the pull request was not opened. Nothing reached your default branch.'
+        : out.files.length
+          ? 'The changes are ready, but the pull request did not open. Nothing reached your default branch.'
+          : 'The model changed nothing, so there is no pull request. Its reasons are below.';
     body = (
       <div className="mt-4 space-y-4">
         {job.error && <p className="text-sm text-ink/70">{job.error}</p>}
@@ -271,6 +276,28 @@ export default function FixPanel({
             </li>
           ))}
         </ul>
+        {out.checks?.length ? (
+          <ul className="divide-y divide-line/60 rounded-xl border border-line">
+            {out.checks.map((c) => {
+              const said = c.ok ? 'passed' : c.before === false ? 'fails without these changes too' : 'failed';
+              return (
+                <li key={c.command} className="px-4 py-2.5">
+                  <div className="flex items-center gap-3">
+                    <StateDot state={c.ok ? 'passed' : c.before === false ? 'skipped' : 'failed'} label={said} />
+                    <code className="min-w-0 flex-1 truncate text-sm text-ink/80">{c.command}</code>
+                    <span className="shrink-0 text-xs text-ink/50">{said}</span>
+                  </div>
+                  {!c.ok && (
+                    <details className="mt-2">
+                      <summary className="cursor-pointer text-xs text-ink/50">Output</summary>
+                      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-ink/70">{c.tail}</pre>
+                    </details>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        ) : null}
         {out.files.map((file) => (
           <Diff key={file.path} file={file} />
         ))}
@@ -288,7 +315,7 @@ export default function FixPanel({
         ) : (
           out.files.length > 0 && (
             <button onClick={open} disabled={busy} className={primary}>
-              {busy ? 'Opening…' : 'Try again'}
+              {busy ? 'Opening…' : broken ? 'Open it anyway' : 'Try again'}
             </button>
           )
         )}

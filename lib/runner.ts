@@ -6,12 +6,13 @@
 import type { DatabaseSync } from 'node:sqlite';
 
 import type { Report } from '../app/types.ts';
-import { finishJob, getAudit, logJob, repoById, setJobPr, type Job, type JobOutput, type PullRequest, type Repo } from './db.ts';
+import { finishJob, getAudit, logJob, repoById, setJobPr, type Check, type Job, type JobOutput, type PullRequest, type Repo } from './db.ts';
 import { fixables } from './fixable.ts';
 import { runFix } from './fixer.ts';
 import { installationToken } from './github-app.ts';
-import { readFile, snapshot } from './github.ts';
+import { readFile, snapshot, tarball } from './github.ts';
 import { openPullRequest } from './github-write.ts';
+import { broke, openBox, sandboxCli, type Box } from './sandbox.ts';
 
 /** A finished audit's report, parsed. */
 export function storedReport(db: DatabaseSync, id: string): Report | null {
@@ -27,6 +28,7 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
     log.push(line);
     logJob(db, job.id, log, tokens);
   };
+  let box: Box | null = null;
   try {
     const repo = repoById(db, job.repoId);
     if (!repo?.installationId) throw new Error('That repository is no longer linked through the GitHub App.');
@@ -37,6 +39,19 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
     if (!token) throw new Error(`The GitHub App can no longer reach ${repo.owner}/${repo.name}.`);
     const snap = await snapshot(repo.owner, repo.name, repo.branch, token);
     if (!snap.ok) throw new Error(snap.reason);
+    const { sha, paths } = snap.value;
+
+    if (sandboxCli()) {
+      say('starting the sandbox');
+      box = await openBox({
+        id: job.id,
+        tarball: await tarball(repo.owner, repo.name, sha, token),
+        paths,
+        pkg: paths.includes('package.json') ? await readFile(repo.owner, repo.name, sha, 'package.json', token) : null,
+        signal: stop,
+        say,
+      });
+    }
 
     const output = await runFix({
       stop,
@@ -58,12 +73,28 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
         tokens = t;
         say(line);
       },
+      run: box?.run,
     });
 
     // The run ends in its pull request. Still `running` until it is open, so
     // the panel never shows a finished fix without one. A pull request that
     // will not open keeps the changes, and the panel offers to try again.
     if (!output.files.length) return finishJob(db, job.id, { output });
+
+    // Proven by us, not by the model saying so. A check these changes broke
+    // means no pull request; the panel shows why and can open it anyway.
+    if (box) {
+      say('checking the changes in the sandbox');
+      output.checks = await box.verify(output.files);
+      for (const c of output.checks) say(`${c.command}: ${verdict(c)}`);
+      const broken = output.checks.filter(broke);
+      if (broken.length) {
+        return finishJob(db, job.id, {
+          output,
+          error: `${broken.map((c) => c.command).join(' and ')} failed with these changes, so no pull request was opened.`,
+        });
+      }
+    }
     stop.throwIfAborted();
     say('opening the pull request');
     const opened = await pull(db, { ...job, output }, repo);
@@ -71,8 +102,12 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
     finishJob(db, job.id, { output, ...(opened.ok ? {} : { error: opened.reason }) });
   } catch (err) {
     finishJob(db, job.id, { error: stop.aborted ? 'Stopped. Nothing was written to GitHub.' : (err as Error).message });
+  } finally {
+    await box?.close();
   }
 }
+
+const verdict = (c: Check) => (c.ok ? 'passed' : c.before === false ? 'failed, as it does without these changes' : 'failed');
 
 function describe(out: JobOutput, kept: Report | null, repo: Repo): { title: string; body: string } {
   const fixed = out.findings.filter((f) => f.status === 'fixed');
@@ -95,8 +130,9 @@ function describe(out: JobOutput, kept: Report | null, repo: Repo): { title: str
     kept?.score?.score != null
       ? `From an audit of ${kept.meta.origin} on ${kept.meta.date}, which scored ${kept.score.score} (${kept.score.grade}).`
       : `From an audit of ${host}.`,
+    ...(out.checks?.length ? ['', '### Checked in a sandbox', ...out.checks.map((c) => `- \`${c.command}\` ${verdict(c)}`)] : []),
     '',
-    'Written by a model from the audit and this repository, and not built or run. Review before merging.',
+    `Written by a model from the audit and this repository${out.checks?.length ? '' : ', and not built or run'}. Review before merging.`,
   ];
   return { title, body: body.join('\n') };
 }

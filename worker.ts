@@ -9,6 +9,7 @@
 import { libraryRoot } from './engine/src/library.mjs';
 import { abandonJobs, claimJob, openDb, stopsAsked } from './lib/db.ts';
 import { runJob } from './lib/runner.ts';
+import { prepareSandbox, sandboxCli } from './lib/sandbox.ts';
 
 const db = openDb(libraryRoot());
 const CONCURRENCY = Number(process.env.FIX_CONCURRENCY) || 2;
@@ -17,6 +18,15 @@ const running = new Map<string, AbortController>();
 // Whatever the last worker was running died with it. Queued jobs wait on.
 const lost = abandonJobs(db, 'The worker restarted before this fix finished. Run it again.');
 console.log(`worker: ${CONCURRENCY} at a time${lost ? `, ${lost} interrupted run(s) marked failed` : ''}`);
+
+// With FIX_SANDBOX set every fix gets a container; without it none runs.
+if (sandboxCli()) {
+  console.log(`worker: preparing the ${sandboxCli()} sandbox (the first time takes a few minutes)`);
+  await prepareSandbox();
+  console.log('worker: sandbox ready');
+} else {
+  console.log('worker: no sandbox (FIX_SANDBOX=docker or podman), so nothing a fix writes is built or run');
+}
 
 function tick() {
   for (const id of stopsAsked(db)) running.get(id)?.abort();

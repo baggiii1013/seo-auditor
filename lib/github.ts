@@ -11,6 +11,9 @@
 // been shown to be absent from the repository. Those come back as `unknown`
 // with the reason attached, never as `missing`.
 
+import { Readable } from 'node:stream';
+import type { ReadableStream as WebStream } from 'node:stream/web';
+
 export type FileState = 'present' | 'missing' | 'unknown';
 
 export type TrackedFile = {
@@ -359,4 +362,11 @@ export async function readFile(
   if (res.status === 404) return null;
   if (!res.ok) throw new Error(`GitHub answered ${res.status} reading ${path}.`);
   return res.text();
+}
+
+/** The repository at `sha` as a gzipped tarball with one top directory. */
+export async function tarball(owner: string, name: string, sha: string, token: string): Promise<Readable> {
+  const res = await fetch(`${API}/repos/${owner}/${name}/tarball/${sha}`, { headers: headers(token), cache: 'no-store' });
+  if (!res.ok || !res.body) throw new Error(`GitHub answered ${res.status} downloading ${owner}/${name}.`);
+  return Readable.fromWeb(res.body as WebStream);
 }

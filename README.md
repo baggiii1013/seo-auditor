@@ -35,8 +35,10 @@ our local patches). It is not re-implemented anywhere:
   card: a model on any OpenAI-compatible endpoint (`AI_API_URL`, `AI_API_KEY`, `AI_MODEL`) reads
   the linked repository, stages changes you review as a diff, and they become a pull request on a
   new branch. The web app queues each fix; `worker.ts` (`npm run worker`) runs it via
-  `lib/runner.ts`. The model's instructions and guardrails are in `seo-agent.md`. See PLAN.md,
-  Phases A and B.
+  `lib/runner.ts`. The model's instructions and guardrails are in `seo-agent.md`. With
+  `FIX_SANDBOX=docker` (or `podman`) each fix also gets a container (`lib/sandbox.ts`,
+  `sandbox/`) to run the site's build, lint and `php -l` in, and a change that breaks one opens
+  no pull request. See PLAN.md, Phases A and B.
 
 Because it runs under Node rather than on Cloudflare, the TLS checks are real.
 

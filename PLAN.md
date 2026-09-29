@@ -236,6 +236,9 @@ SEO_AUDIT_HOME=/data npm run worker                  # runs the fixes; keep it u
 | `AI_TOKEN_BUDGET`                                  | no cap                     | Tokens (in + out) one fix may spend before it is stopped                  |
 | `AI_MAX_TURNS`                                     | no cap                     | Round trips to the model one fix may take before it is stopped            |
 | `FIX_CONCURRENCY`                                  | 2                          | Fixes the worker runs at once                                             |
+| `FIX_SANDBOX`                                      | unset                      | `docker` or `podman`: run each fix's build and lint in a container        |
+| `FIX_SANDBOX_MINUTES`                              | 30                         | A sandbox container's whole life                                          |
+| `FIX_SANDBOX_RUNTIME`                              | default                    | Container runtime, e.g. `runsc` for gVisor                                |
 
 ---
 
@@ -400,7 +403,46 @@ more than one host, or move to Trigger.dev or Inngest (see the n8n discussion: a
 builder does not fit here). The sandboxed agent below becomes a second `kind` that this same
 loop claims.
 
-### Sandbox
+### Sandbox (built, local)
+
+`FIX_SANDBOX=docker` or `podman` (the CLI to call). The worker builds the image
+(`sandbox/Dockerfile`: Node 24, PHP, Git) on start. It also creates two networks and starts
+`seo-auditor-egress`, a CONNECT proxy (`sandbox/egress.mjs`) that allows only
+`fonts.googleapis.com` and `fonts.gstatic.com`. Per job (`lib/sandbox.ts`, called from
+`lib/runner.ts`):
+
+1. A container: 2 CPU, 4 GB, 512 pids, all capabilities dropped, no-new-privileges, no host
+   mounts. It runs `sleep`, so it dies on its own after `FIX_SANDBOX_MINUTES` even if the
+   worker does.
+2. The repository comes in as GitHub's tarball at the pinned SHA, streamed by the worker, so no
+   token goes inside. It is committed to a throwaway Git repo there, and the dependencies are
+   installed (`npm ci`, `pnpm install --frozen-lockfile`, `yarn install` or `npm install`) with
+   open egress, before the model has any say.
+3. The container then moves to an `--internal` network whose only way out is the proxy. Next's
+   `next/font/google` fetches fonts at build time, and nothing else gets out.
+4. The model gets a `run(command)` tool. Every run first resets the checkout to the commit and
+   lays the staged changes over it, so a command's own writes never reach the PR. The loop and
+   the API key stay in the worker, so no API proxy is needed and any OpenAI-compatible model
+   still works.
+5. After `done`, **we** run `php -l` on each changed PHP file and the site's `build` and `lint`
+   scripts. A script that fails is re-run without the changes. Only a failure the changes caused
+   (or any `php -l` failure) blocks the PR. The panel shows each check with its output and offers
+   **Open it anyway**, and the PR body lists them.
+
+Known ceilings (`ponytail:` in the code):
+
+- the install has open egress;
+- the disk has no quota;
+- pass/fail only, so a lint already failing can't tell a new error from the old ones;
+- only the root `package.json` is used;
+- no Composer install.
+
+Tested: `lib/sandbox.test.ts` (with `FIX_SANDBOX=podman`) covers offline, the proxy allowlist,
+writes thrown away, and broken-vs-pre-existing. The end-to-end run used a scripted model on
+baggiii1013/kaustubh-bagale: install, `next build` passing through the font proxy, a broken PHP
+file blocking the PR.
+
+### Sandbox (the original plan, for hosting)
 
 One container per job. Options: **Docker locally** (gVisor runtime if available), then **E2B**
 or **Vercel Sandbox** when hosted. Limits: 2 CPU, 4 GB, 15 min, no host mounts.
