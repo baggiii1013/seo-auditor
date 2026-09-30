@@ -67,6 +67,14 @@ function Diff({ file }: { file: NonNullable<Job['output']>['files'][number] }) {
   );
 }
 
+/** Save a finished fix's Excel report (lib/fix-report.ts). */
+const download = (id: string) => {
+  const a = document.createElement('a');
+  a.href = `/api/fixes/${id}/report`;
+  a.download = '';
+  a.click();
+};
+
 /** Not finished: waiting for the worker, or with it. */
 const active = (job: Job) => job.status === 'queued' || job.status === 'running';
 
@@ -126,7 +134,11 @@ export default function FixPanel({
       if (!res?.ok) return;
       const { job: next }: { job: Job } = await res.json();
       setJob(next);
-      if (!active(next)) setJobs((all) => [next, ...(all ?? []).filter((j) => j.id !== next.id)]);
+      if (active(next)) return;
+      setJobs((all) => [next, ...(all ?? []).filter((j) => j.id !== next.id)]);
+      // Only a fix watched to its end: one finished before a reload was
+      // downloaded then, and the button below has it again.
+      if (next.status === 'done') download(next.id);
     }, 1500);
     return () => clearInterval(timer);
   }, [runningId]);
@@ -310,6 +322,9 @@ export default function FixPanel({
       <>
         <button onClick={back} disabled={busy} className={ghost}>
           {job.pr ? 'Fix more' : out.files.length ? 'Discard' : 'Back'}
+        </button>
+        <button onClick={() => download(job.id)} className={ghost}>
+          Excel report
         </button>
         {job.pr ? (
           <a href={job.pr.url} target="_blank" rel="noreferrer" className={primary}>

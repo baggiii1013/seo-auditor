@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { report } from './audits';
 import { activeJob, createJob, finishJob, getJob, repoById, repoJobs, setJobPr, stopJob, type Job, type Repo } from './db';
 import { fixables } from './fixable';
+import { fixReport } from './fix-report';
 import { aiConfigured } from './fixer';
 import { installationToken } from './github-app';
 import { pullState } from './github-write';
@@ -90,4 +91,12 @@ export async function openFixPr(userId: number, id: string): Promise<{ job: Job 
   setJobPr(store(), id, opened.pr);
   finishJob(store(), id, { output: job.output });
   return { job: getJob(store(), id)! };
+}
+
+/** A finished fix as an Excel workbook (lib/fix-report.ts). */
+export function fixWorkbook(userId: number, id: string): { name: string; file: Buffer } | Refusal {
+  const job = fixFor(userId, id);
+  if (!job) return { error: 'No such fix.', status: 404 };
+  if (job.status !== 'done') return { error: 'This fix has not finished.', status: 409 };
+  return fixReport(job, report(job.auditId) as Report | null, repoById(store(), job.repoId));
 }
