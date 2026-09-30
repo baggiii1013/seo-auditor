@@ -1,10 +1,11 @@
 // The app's own store, kept beside the engine's report library.
 //
-// `node:sqlite` rather than a driver package. Node ships a SQLite binding and
-// this needs two tables and four statements; a dependency for that is a
-// dependency to keep patched forever. It prints an experimental warning, which
-// means the *API* may move between major Node versions — not that it drops
-// rows.
+// The runtime's own SQLite rather than a driver package: a dependency is one to
+// keep patched forever. That is `bun:sqlite` under Bun (the worker) and
+// `node:sqlite` under Node (`next dev`/`next start`, `node --test`) — neither
+// runtime has the other's. Every call here (prepare, get, all, run, exec) acts
+// the same in both, except a miss is `null` in Bun and `undefined` in Node, and
+// every caller tests truthiness.
 //
 // The library root is a parameter rather than something this file resolves.
 // Two reasons, and the second is the real one:
@@ -22,11 +23,17 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 
 import { siteKey } from './site-key.ts';
 
 export { siteKey };
+
+// getBuiltinModule rather than an import, so neither the bundler nor either
+// runtime tries to resolve the driver it doesn't have.
+const Sqlite: typeof DatabaseSync = process.versions.bun
+  ? (process.getBuiltinModule('bun:sqlite') as { Database: typeof DatabaseSync }).Database
+  : (process.getBuiltinModule('node:sqlite') as { DatabaseSync: typeof DatabaseSync }).DatabaseSync;
 
 /** A repository linked to an audited site. */
 export type Repo = {
@@ -159,7 +166,7 @@ export function openDb(root: string): DatabaseSync {
   if (existing) return existing;
 
   mkdirSync(root, { recursive: true });
-  const db = new DatabaseSync(join(root, 'app.db'));
+  const db = new Sqlite(join(root, 'app.db'));
   db.exec(SCHEMA);
   migrate(db);
 
@@ -387,8 +394,9 @@ export function abandonAudits(db: DatabaseSync, reason: string): number {
 
 export type JobStatus = 'queued' | 'running' | 'done' | 'failed';
 
-/** What a fix asked for: the checks picked from one stored audit. */
-export type JobInput = { checks: string[] };
+/** What a fix asked for: the checks picked from one stored audit, and
+ *  anything else in the user's own words — reported on as the id `request`. */
+export type JobInput = { checks: string[]; request?: string };
 
 /** What the model left staged, and what it says about each check. `before` is
  *  `null` for a file it created. */

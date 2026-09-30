@@ -137,7 +137,7 @@ const TOOLS = [
   ]),
   fn(
     'done',
-    'Finish. Give every finding id you were asked about a status and one sentence of why.',
+    'Finish. Give every finding id you were asked about, and `request` if there was one, a status and one sentence of why.',
     {
       summary: str('What you changed, for the pull request, in a few sentences'),
       findings: {
@@ -177,13 +177,16 @@ const instructions = (wordpress: boolean) =>
 export const isWordPress = (paths: string[]) =>
   paths.some((p) => /(^|\/)(wp-config(-sample)?\.php|functions\.php|theme\.json)$|(^|\/)wp-content\//.test(p));
 
-/** What the model is told: the findings, the files, and the crawl's facts.
- *  Exported for the test, which checks the untrusted parts are fenced. */
+/** What the model is told: the findings, the files, the crawl's facts, and
+ *  what the user asked for besides. Exported for the test, which checks the
+ *  untrusted parts are fenced. */
 export function brief(o: {
   origin: string;
   repo: string;
   snap: Snapshot;
   checks: Fixable[];
+  /** The user's own words: from whoever linked the repository, not the crawl. */
+  request?: string;
   drafts: { sitemapUrls?: string[]; sitemapRefused?: string | null; llms?: string | null; llmsRefused?: string | null };
 }): string {
   const files = o.snap.paths.length > 400 ? [...o.snap.paths.slice(0, 400), `… and ${o.snap.paths.length - 400} more (use list_files)`] : o.snap.paths;
@@ -194,7 +197,10 @@ export function brief(o: {
     'Files:',
     ...files,
     '',
-    'Findings to fix. The ids are the ones to report on in done.',
+    ...(o.request
+      ? ['Asked for by the owner, besides the findings. Report on it in done as the id `request`.', '<request>', o.request, '</request>', '']
+      : []),
+    o.checks.length ? 'Findings to fix. The ids are the ones to report on in done.' : 'No findings were picked: the request is the whole job.',
     '<crawl>',
   ];
   for (const c of o.checks) {
@@ -245,6 +251,7 @@ export async function runFix(o: {
   repo: string;
   snap: Snapshot;
   checks: Fixable[];
+  request?: string;
   drafts: Parameters<typeof brief>[0]['drafts'];
   read: (path: string) => Promise<string | null>;
   onLog: (line: string, tokens: { in: number; out: number }) => void;
@@ -287,7 +294,7 @@ export async function runFix(o: {
       }
       const name = call.function.name;
       if (name === 'done') {
-        const asked = new Set(o.checks.map((c) => c.id));
+        const asked = new Set([...o.checks.map((c) => c.id), ...(o.request ? ['request'] : [])]);
         const said = (Array.isArray(args.findings) ? args.findings : []).filter(
           (f): f is JobOutput['findings'][number] => asked.has(f?.id) && (f.status === 'fixed' || f.status === 'skipped'),
         );

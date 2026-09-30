@@ -24,6 +24,11 @@ test('the lockfile picks the installer, and only build and lint are checks', () 
     ],
   });
   assert.deepEqual(plan(['package.json', 'pnpm-lock.yaml'], '{}').install, ['pnpm', 'install', '--frozen-lockfile']);
+  // A Bun project has no npm lockfile: npm would resolve the whole tree afresh, for minutes.
+  assert.deepEqual(plan(['package.json', 'bun.lock'], pkg), {
+    install: ['bun', 'install', '--frozen-lockfile'],
+    scripts: [['bun', 'run', 'build'], ['bun', 'run', 'lint']],
+  });
   assert.deepEqual(plan(['package.json'], 'not json'), { install: ['npm', 'install'], scripts: [] });
 });
 

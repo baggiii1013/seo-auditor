@@ -104,15 +104,15 @@ export async function prepareSandbox(): Promise<void> {
 export function plan(paths: string[], pkg: string | null): { install: string[] | null; scripts: string[][] } {
   if (pkg === null) return { install: null, scripts: [] };
   const has = (file: string) => paths.includes(file);
-  const pm = has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : 'npm';
+  const pm = has('bun.lock') || has('bun.lockb') ? 'bun' : has('pnpm-lock.yaml') ? 'pnpm' : has('yarn.lock') ? 'yarn' : 'npm';
   let scripts: Record<string, unknown> = {};
   try {
     scripts = JSON.parse(pkg).scripts ?? {};
   } catch {}
   return {
     install:
-      pm === 'pnpm'
-        ? ['pnpm', 'install', '--frozen-lockfile']
+      pm === 'bun' || pm === 'pnpm'
+        ? [pm, 'install', '--frozen-lockfile']
         : pm === 'yarn'
           ? ['yarn', 'install']
           : ['npm', has('package-lock.json') ? 'ci' : 'install'],

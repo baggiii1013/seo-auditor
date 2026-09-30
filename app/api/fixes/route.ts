@@ -21,15 +21,15 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  const body: { origin?: string; audit?: string; checks?: string[] } | null = await request.json().catch(() => null);
-  if (!body?.origin || !body.audit || !Array.isArray(body.checks)) return bad('Expected { origin, audit, checks }.');
+  const body: { origin?: string; audit?: string; checks?: string[]; request?: string } | null = await request.json().catch(() => null);
+  if (!body?.origin || !body.audit || !Array.isArray(body.checks)) return bad('Expected { origin, audit, checks, request? }.');
   const user = await currentUser();
   if (!user) return bad('Continue with GitHub first.', 401);
   const repo = linkedRepo(store(), user, body.origin);
   if (!repo) return bad('Link a repository to this site first.', 404);
   const slow = await limit('fix', request);
   if (slow) return slow;
-  const started = await startFix(user, repo, body.audit, body.checks.map(String));
+  const started = await startFix(user, repo, body.audit, body.checks.map(String), String(body.request ?? ''));
   if ('error' in started) return bad(started.error, started.status);
   return Response.json(started, { status: 202 });
 }

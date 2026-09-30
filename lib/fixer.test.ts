@@ -151,3 +151,30 @@ test('WordPress is recognised, gets its own rules, and its core and config are o
   });
   assert.ok(system.includes(readFileSync(new URL('../seo-agent-wordpress.md', import.meta.url), 'utf8')));
 });
+
+test("the owner's request is asked for outside the crawl, and counts like a finding", async () => {
+  process.env.AI_API_URL = 'http://model.test/v1';
+  process.env.AI_MODEL = 'm';
+  let user = '';
+  const done = { id: 'x', function: { name: 'done', arguments: '{"summary":"s","findings":[]}' } };
+  globalThis.fetch = (async (_url: string, init: RequestInit) => {
+    user = JSON.parse(String(init.body)).messages[1].content;
+    return Response.json({ choices: [{ message: { tool_calls: [done] } }] });
+  }) as typeof fetch;
+  const out = await runFix({
+    origin: 'https://acme.test',
+    repo: 'acme/site',
+    snap: { branch: 'main', sha: 'abc', paths: [], truncated: false },
+    checks: [],
+    request: 'Add Organization structured data.',
+    drafts: {},
+    read: async () => null,
+    onLog: () => {},
+    stop: new AbortController().signal,
+  });
+  assert.ok(user.indexOf('<request>\nAdd Organization structured data.\n</request>') < user.indexOf('<crawl>'));
+  assert.deepEqual(
+    out.findings.map((f) => [f.id, f.status]),
+    [['request', 'skipped']],
+  );
+});

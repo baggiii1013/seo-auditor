@@ -5,20 +5,13 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 
-import type { Report } from '../app/types.ts';
-import { finishJob, getAudit, logJob, repoById, setJobPr, type Check, type Job, type JobOutput, type PullRequest, type Repo } from './db.ts';
+import { finishJob, logJob, repoById, setJobPr, type Job } from './db.ts';
 import { fixables } from './fixable.ts';
 import { runFix } from './fixer.ts';
 import { installationToken } from './github-app.ts';
 import { readFile, snapshot, tarball } from './github.ts';
-import { openPullRequest } from './github-write.ts';
+import { pull, storedReport, verdict } from './pull.ts';
 import { broke, openBox, sandboxCli, type Box } from './sandbox.ts';
-
-/** A finished audit's report, parsed. */
-export function storedReport(db: DatabaseSync, id: string): Report | null {
-  const row = getAudit(db, id);
-  return row?.status === 'done' && row.result ? JSON.parse(row.result) : null;
-}
 
 /** Run one claimed job until it ends. Never throws: the row has the outcome. */
 export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Promise<void> {
@@ -59,6 +52,7 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
       repo: `${repo.owner}/${repo.name}`,
       snap: snap.value,
       checks: fixables(kept).filter((f) => job.input.checks.includes(f.id)),
+      request: job.input.request,
       drafts: {
         sitemapUrls: kept.sitemap?.urls,
         sitemapRefused: kept.sitemap?.refused,
@@ -105,56 +99,4 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
   } finally {
     await box?.close();
   }
-}
-
-const verdict = (c: Check) => (c.ok ? 'passed' : c.before === false ? 'failed, as it does without these changes' : 'failed');
-
-function describe(out: JobOutput, kept: Report | null, repo: Repo): { title: string; body: string } {
-  const fixed = out.findings.filter((f) => f.status === 'fixed');
-  const skipped = out.findings.filter((f) => f.status === 'skipped');
-  const titles = new Map((kept ? fixables(kept) : []).map((f) => [f.id, f.title]));
-  const name = (id: string) => `**${titles.get(id) ?? id}** (\`${id}\`)`;
-  const host = kept ? new URL(kept.meta.origin).host : `${repo.owner}/${repo.name}`;
-  const title =
-    fixed.length === 1 ? `SEO: ${titles.get(fixed[0].id) ?? fixed[0].id}` : `SEO: fix ${fixed.length} findings on ${host}`;
-  const body = [
-    out.summary,
-    '',
-    '### Fixed',
-    ...(fixed.length ? fixed.map((f) => `- ${name(f.id)} — ${f.why}`) : ['- Nothing.']),
-    ...(skipped.length ? ['', '### Skipped', ...skipped.map((f) => `- ${name(f.id)} — ${f.why}`)] : []),
-    '',
-    '### Files',
-    ...out.files.map((f) => `- \`${f.path}\` ${f.before === null ? '(new)' : '(changed)'}`),
-    '',
-    kept?.score?.score != null
-      ? `From an audit of ${kept.meta.origin} on ${kept.meta.date}, which scored ${kept.score.score} (${kept.score.grade}).`
-      : `From an audit of ${host}.`,
-    ...(out.checks?.length ? ['', '### Checked in a sandbox', ...out.checks.map((c) => `- \`${c.command}\` ${verdict(c)}`)] : []),
-    '',
-    `Written by a model from the audit and this repository${out.checks?.length ? '' : ', and not built or run'}. Review before merging.`,
-  ];
-  return { title, body: body.join('\n') };
-}
-
-/** Commit a fix's changes on its own branch and open the pull request. */
-export async function pull(
-  db: DatabaseSync,
-  job: Pick<Job, 'id' | 'auditId' | 'createdAt'> & { output: JobOutput },
-  repo: Repo,
-): Promise<{ ok: true; pr: PullRequest } | { ok: false; reason: string }> {
-  const token = repo.installationId && (await installationToken(repo.installationId));
-  if (!token) return { ok: false, reason: `The GitHub App can no longer reach ${repo.owner}/${repo.name}.` };
-  const branch = `seo-auditor/${job.createdAt.slice(0, 10)}-${job.id.slice(0, 8)}`;
-  const written = await openPullRequest({
-    token,
-    owner: repo.owner,
-    name: repo.name,
-    base: job.output.base.branch,
-    sha: job.output.base.sha,
-    branch,
-    files: job.output.files.map((f) => ({ path: f.path, content: f.after })),
-    ...describe(job.output, storedReport(db, job.auditId), repo),
-  });
-  return written.ok ? { ok: true, pr: { number: written.number, url: written.url, branch, state: 'open' } } : written;
 }

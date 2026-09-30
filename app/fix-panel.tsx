@@ -94,6 +94,7 @@ export default function FixPanel({
   const [jobs, setJobs] = useState<Job[] | null>(null);
   const [job, setJob] = useState<Job | null>(null);
   const [picked, setPicked] = useState(() => new Set(items.filter((i) => i.kind === 'file').map((i) => i.id)));
+  const [request, setRequest] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -151,10 +152,11 @@ export default function FixPanel({
       const res = await fetch('/api/fixes', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ origin, audit: auditId, checks: [...picked].filter((id) => !covered.has(id)) }),
+        body: JSON.stringify({ origin, audit: auditId, checks: [...picked].filter((id) => !covered.has(id)), request }),
       });
       if (!res.ok) throw new Error(await failure(res));
       setJob((await res.json()).job);
+      setRequest('');
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -179,7 +181,8 @@ export default function FixPanel({
     }
   };
 
-  const title = (id: string) => items.find((i) => i.id === id)?.title ?? id;
+  const title = (id: string) =>
+    id === 'request' && job?.input.request ? `Your request: ${job.input.request}` : (items.find((i) => i.id === id)?.title ?? id);
   const back = () => {
     setJob(null);
     setError(null);
@@ -321,11 +324,11 @@ export default function FixPanel({
         )}
       </>
     );
-  } else if (!items.length) {
-    caption = 'Nothing in this report is something a model can fix from the source alone.';
   } else {
     const inPrs = items.length - free.length;
-    caption = !free.length
+    caption = !items.length
+      ? 'Nothing in this report is on the list a model fixes from the source. Say what you want changed below, and a model makes it in a pull request.'
+      : !free.length
       ? `Everything here is already fixed in an open pull request. Merge ${pending.length === 1 ? 'it' : 'them'} on GitHub, deploy, and audit again to see the findings pass.`
       : inPrs
         ? `${inPrs} ${inPrs === 1 ? 'finding is' : 'findings are'} already fixed in an open pull request, waiting for review. Pick from the rest: a model reads the repository and opens a new pull request for them.`
@@ -393,10 +396,21 @@ export default function FixPanel({
             ))}
           </ul>
         )}
+        <label className="mt-4 block">
+          <span className="t-eyebrow text-ink/45">Anything else</span>
+          <textarea
+            value={request}
+            onChange={(e) => setRequest(e.target.value)}
+            rows={3}
+            maxLength={2000}
+            placeholder="A fix the list does not offer, in your own words. For example: add Organization structured data to the home page, from the details in the footer."
+            className="mt-2 block w-full resize-y rounded-lg border border-line bg-white/[0.06] px-3 py-2 text-sm text-ink outline-none transition duration-150 ease-out placeholder:text-ink/40 focus:border-brand focus:ring-2 focus:ring-brand/15"
+          />
+        </label>
       </>
     );
-    const count = [...picked].filter((id) => !covered.has(id)).length;
-    actions = free.length > 0 && (
+    const count = [...picked].filter((id) => !covered.has(id)).length + (request.trim() ? 1 : 0);
+    actions = (
       <button onClick={start} disabled={busy || !count || jobs === null} className={primary}>
         {busy ? 'Starting…' : count ? `Fix ${count} with AI` : 'Fix with AI'}
       </button>

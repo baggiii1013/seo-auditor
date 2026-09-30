@@ -6,7 +6,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "worker": "node --env-file-if-exists=.env.local --no-warnings worker.ts",
+    "worker": "bun --env-file-if-exists=.env.local --no-warnings worker.ts",
     "lint": "eslint",
     "check": "node check.mjs",
     "test:app": "node --no-warnings --test lib/*.test.ts"

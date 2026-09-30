@@ -6,7 +6,7 @@ import { fixables } from './fixable';
 import { aiConfigured } from './fixer';
 import { installationToken } from './github-app';
 import { pullState } from './github-write';
-import { pull } from './runner';
+import { pull } from './pull';
 import { store } from './store';
 import type { Report } from '@/app/types';
 
@@ -16,8 +16,11 @@ import type { Report } from '@/app/types';
 
 type Refusal = { error: string; status: number };
 
-/** Queue a fix of `checks` from stored audit `auditId` in `repo`, as `userId`. */
-export function startFix(userId: number, repo: Repo, auditId: string, checks: string[]): { job: Job } | Refusal {
+const MAX_REQUEST = 2000;
+
+/** Queue a fix of `checks` from stored audit `auditId` in `repo`, plus
+ *  `request` in the user's words, as `userId`. */
+export function startFix(userId: number, repo: Repo, auditId: string, checks: string[], request = ''): { job: Job } | Refusal {
   if (!aiConfigured()) return { error: 'No model is set up: add AI_API_URL, AI_API_KEY and AI_MODEL to .env.local.', status: 503 };
   if (activeJob(store(), userId)) return { error: 'A fix is already running. Wait for it to finish.', status: 409 };
   if (!repo.installationId) return { error: 'Import this repository again through the GitHub App to fix it.', status: 422 };
@@ -25,11 +28,13 @@ export function startFix(userId: number, repo: Repo, auditId: string, checks: st
   const kept = report(auditId) as Report | null;
   if (!kept) return { error: 'That report is gone — reports are kept for a week. Run the audit again.', status: 404 };
   const picked = fixables(kept).filter((f) => checks.includes(f.id));
-  if (!picked.length) return { error: 'Pick at least one finding this can fix.', status: 400 };
+  request = request.trim();
+  if (!picked.length && !request) return { error: 'Pick a finding, or say what else to fix.', status: 400 };
+  if (request.length > MAX_REQUEST) return { error: `Keep the request under ${MAX_REQUEST} characters.`, status: 400 };
 
   const id = randomUUID();
   try {
-    createJob(store(), { id, userId, repoId: repo.id, auditId, input: { checks: picked.map((f) => f.id) } });
+    createJob(store(), { id, userId, repoId: repo.id, auditId, input: { checks: picked.map((f) => f.id), ...(request ? { request } : {}) } });
   } catch {
     return { error: 'A fix is already running. Wait for it to finish.', status: 409 };
   }
