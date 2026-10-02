@@ -15,7 +15,7 @@ export async function GET(request: Request) {
   const origin = new URL(request.url).searchParams.get('origin');
   if (!origin) return bad('An `origin` is required.');
   const user = await currentUser();
-  const repo = user && linkedRepo(store(), user, origin);
+  const repo = user && (await linkedRepo(await store(), user, origin));
   if (!repo) return Response.json({ jobs: [] });
   return Response.json({ jobs: await repoFixes(repo) });
 }
@@ -25,7 +25,7 @@ export async function POST(request: Request) {
   if (!body?.origin || !body.audit || !Array.isArray(body.checks)) return bad('Expected { origin, audit, checks, request? }.');
   const user = await currentUser();
   if (!user) return bad('Continue with GitHub first.', 401);
-  const repo = linkedRepo(store(), user, body.origin);
+  const repo = await linkedRepo(await store(), user, body.origin);
   if (!repo) return bad('Link a repository to this site first.', 404);
   const slow = await limit('fix', request);
   if (slow) return slow;

@@ -39,9 +39,10 @@ export async function GET(request: Request) {
 export async function DELETE(request: Request) {
   const user = await currentUser();
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
-  if (token) endSession(store(), token);
-  const saved = user ? githubAccount(store(), user) : null;
-  if (user) forgetGithubAccount(store(), user);
+  const db = await store();
+  if (token) await endSession(db, token);
+  const saved = user ? await githubAccount(db, user) : null;
+  if (user) await forgetGithubAccount(db, user);
   if (saved) await revokeUserToken(saved.token);
   return Response.json({ ok: true }, { headers: { 'set-cookie': sessionCookie(request, '', 0) } });
 }

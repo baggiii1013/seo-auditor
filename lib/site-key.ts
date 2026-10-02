@@ -1,5 +1,5 @@
 // Its own file so the report (a client component) can compute the same key the
-// store writes under, without importing node:sqlite into the browser bundle.
+// store writes under, without importing the Postgres driver into the browser bundle.
 
 /** The key a repository is linked under.
  *

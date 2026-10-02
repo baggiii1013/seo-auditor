@@ -11,6 +11,8 @@ import { store } from '@/lib/store';
 /** A page that tells the opener how it went and closes itself — and, on
  *  success, hands this browser its session cookie. */
 function done(message: string, ok: boolean, cookie?: string) {
+  // The popup is all the user sees of a refusal; this is the server's copy.
+  if (!ok) console.error(`github sign-in refused: ${message}`);
   // On success `message` is the login, which the panel shows as "connected as".
   const payload = JSON.stringify({ type: 'github-connect', ok, message }).replace(/</g, '\\u003c');
   return new Response(
@@ -54,8 +56,8 @@ export async function GET(request: Request) {
   const who = await whoami(got.token);
   if (!who) return done('Got a token, but GitHub would not say whose it is.', false);
 
-  const db = store();
-  const user = userForGithub(db, who.id, who.login);
-  saveGithubAccount(db, user, { login: who.login, ...got });
-  return done(who.login, true, sessionCookie(request, createSession(db, user)));
+  const db = await store();
+  const user = await userForGithub(db, who.id, who.login);
+  await saveGithubAccount(db, user, { login: who.login, ...got });
+  return done(who.login, true, sessionCookie(request, await createSession(db, user)));
 }

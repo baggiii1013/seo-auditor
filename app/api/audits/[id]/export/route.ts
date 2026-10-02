@@ -8,7 +8,7 @@ import { limit } from '@/lib/limit';
 export async function GET(request: Request, ctx: RouteContext<'/api/audits/[id]/export'>) {
   const slow = await limit('export', request);
   if (slow) return slow;
-  const kept = report((await ctx.params).id);
+  const kept = await report((await ctx.params).id);
   if (!kept) return new Response('That report is gone — reports are kept for a week.', { status: 404 });
   const as = new URL(request.url).searchParams.get('as') ?? 'html';
   return engine('render', new URLSearchParams({ as }), {

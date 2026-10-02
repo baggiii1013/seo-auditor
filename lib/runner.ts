@@ -3,9 +3,7 @@
 // web app and no request's time limit applies. Plain Node imports (`.ts`, no
 // `@/`), because the worker is not bundled.
 
-import type { DatabaseSync } from 'node:sqlite';
-
-import { finishJob, logJob, repoById, setJobPr, type Job } from './db.ts';
+import { finishJob, logJob, repoById, setJobPr, type Db, type Job } from './db.ts';
 import { fixables } from './fixable.ts';
 import { runFix } from './fixer.ts';
 import { installationToken } from './github-app.ts';
@@ -14,18 +12,27 @@ import { pull, storedReport, verdict } from './pull.ts';
 import { broke, openBox, sandboxCli, type Box } from './sandbox.ts';
 
 /** Run one claimed job until it ends. Never throws: the row has the outcome. */
-export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Promise<void> {
+export async function runJob(db: Db, job: Job, stop: AbortSignal): Promise<void> {
   const log: string[] = [];
   let tokens = job.tokens;
+  // One write at a time, in order: two in flight at once could land an older
+  // log over a newer one. The run ends only once the last has landed.
+  let written = Promise.resolve();
   const say = (line: string) => {
     log.push(line);
-    logJob(db, job.id, log, tokens);
+    written = written
+      .then(() => logJob(db, job.id, log, tokens))
+      .catch((err) => console.error(`worker: ${job.id} log not saved:`, err));
+  };
+  const finish = async (outcome: Parameters<typeof finishJob>[2]) => {
+    await written;
+    await finishJob(db, job.id, outcome);
   };
   let box: Box | null = null;
   try {
-    const repo = repoById(db, job.repoId);
+    const repo = await repoById(db, job.repoId);
     if (!repo?.installationId) throw new Error('That repository is no longer linked through the GitHub App.');
-    const kept = storedReport(db, job.auditId);
+    const kept = await storedReport(db, job.auditId);
     if (!kept) throw new Error('That report is gone — reports are kept for a week. Run the audit again.');
     const installation = repo.installationId;
     const token = await installationToken(installation);
@@ -73,7 +80,7 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
     // The run ends in its pull request. Still `running` until it is open, so
     // the panel never shows a finished fix without one. A pull request that
     // will not open keeps the changes, and the panel offers to try again.
-    if (!output.files.length) return finishJob(db, job.id, { output });
+    if (!output.files.length) return await finish({ output });
 
     // Proven by us, not by the model saying so. A check these changes broke
     // means no pull request; the panel shows why and can open it anyway.
@@ -83,7 +90,7 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
       for (const c of output.checks) say(`${c.command}: ${verdict(c)}`);
       const broken = output.checks.filter(broke);
       if (broken.length) {
-        return finishJob(db, job.id, {
+        return await finish({
           output,
           error: `${broken.map((c) => c.command).join(' and ')} failed with these changes, so no pull request was opened.`,
         });
@@ -92,10 +99,12 @@ export async function runJob(db: DatabaseSync, job: Job, stop: AbortSignal): Pro
     stop.throwIfAborted();
     say('opening the pull request');
     const opened = await pull(db, { ...job, output }, repo);
-    if (opened.ok) setJobPr(db, job.id, opened.pr);
-    finishJob(db, job.id, { output, ...(opened.ok ? {} : { error: opened.reason }) });
+    if (opened.ok) await setJobPr(db, job.id, opened.pr);
+    await finish({ output, ...(opened.ok ? {} : { error: opened.reason }) });
   } catch (err) {
-    finishJob(db, job.id, { error: stop.aborted ? 'Stopped. Nothing was written to GitHub.' : (err as Error).message });
+    await finish({ error: stop.aborted ? 'Stopped. Nothing was written to GitHub.' : (err as Error).message }).catch((e) =>
+      console.error(`worker: ${job.id} outcome not saved:`, e),
+    );
   } finally {
     await box?.close();
   }

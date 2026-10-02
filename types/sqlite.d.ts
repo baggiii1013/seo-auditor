@@ -3,9 +3,8 @@
 // declare the handful of members we actually call rather than pull a new major
 // of @types/node through the whole app to get them.
 //
-// Verified against the runtime rather than written from memory — `run` really
-// does return `{ changes, lastInsertRowid }`, and `get` misses with `undefined`
-// (`null` under Bun, whose `bun:sqlite` lib/db.ts swaps in for this class).
+// Only scripts/import-sqlite.ts uses it now, to read the store from before
+// Postgres.
 
 declare module 'node:sqlite' {
   export type SQLValue = null | number | bigint | string | Uint8Array;

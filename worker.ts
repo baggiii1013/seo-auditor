@@ -2,22 +2,29 @@
 // app only queues fixes in the store; this takes them, FIX_CONCURRENCY at a
 // time, and runs each to its pull request (lib/runner.ts).
 //
-// ponytail: SQLite as the queue, polled every second, one worker per store.
-// More than one host means a real queue (or Trigger.dev / Inngest) and claims
-// with a lease.
+// ponytail: Postgres as the queue, polled every second. Claims skip rows
+// another worker holds, but a restart fails every running job, so one worker
+// per store until claims carry a lease (or Trigger.dev / Inngest takes over).
 
-import { libraryRoot } from './engine/src/library.mjs';
+import { setTimeout as sleep } from 'node:timers/promises';
+
 import { abandonJobs, claimJob, openDb, stopsAsked } from './lib/db.ts';
 import { runJob } from './lib/runner.ts';
 import { prepareSandbox, sandboxCli } from './lib/sandbox.ts';
 
-const db = openDb(libraryRoot());
+const db = await openDb();
 const CONCURRENCY = Number(process.env.FIX_CONCURRENCY) || 2;
 const running = new Map<string, AbortController>();
 
 // Whatever the last worker was running died with it. Queued jobs wait on.
-const lost = abandonJobs(db, 'The worker restarted before this fix finished. Run it again.');
+const lost = await abandonJobs(db, 'The worker restarted before this fix finished. Run it again.');
 console.log(`worker: ${CONCURRENCY} at a time${lost ? `, ${lost} interrupted run(s) marked failed` : ''}`);
+
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    void abandonJobs(db, 'The worker was shut down before this fix finished. Run it again.').finally(() => process.exit(0));
+  });
+}
 
 // With FIX_SANDBOX set every fix gets a container; without it none runs.
 if (sandboxCli()) {
@@ -28,10 +35,10 @@ if (sandboxCli()) {
   console.log('worker: no sandbox (FIX_SANDBOX=docker or podman), so nothing a fix writes is built or run');
 }
 
-function tick() {
-  for (const id of stopsAsked(db)) running.get(id)?.abort();
+async function tick() {
+  for (const id of await stopsAsked(db)) running.get(id)?.abort();
   while (running.size < CONCURRENCY) {
-    const job = claimJob(db);
+    const job = await claimJob(db);
     if (!job) break;
     const stop = new AbortController();
     running.set(job.id, stop);
@@ -43,12 +50,9 @@ function tick() {
   }
 }
 
-setInterval(tick, 1000);
-tick();
-
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    abandonJobs(db, 'The worker was shut down before this fix finished. Run it again.');
-    process.exit(0);
-  });
+// One tick after another, never two at once. A database that drops out is
+// asked again next second rather than taking the worker down.
+for (;;) {
+  await tick().catch((err) => console.error('worker:', (err as Error).message));
+  await sleep(1000);
 }

@@ -8,7 +8,7 @@ import type { Repo } from '@/lib/db';
 // Which repository is linked to an audited site, and what is in it.
 //
 // Read-only against GitHub. The one thing this route writes is the link itself,
-// and that lives in the app's own SQLite store — see lib/db.ts.
+// and that lives in the app's own Postgres store — see lib/db.ts.
 //
 // Only called once a repository is linked (or being linked): whether one is, and
 // who is connected, reaches the report with the page — see lib/git-state.ts.
@@ -23,7 +23,7 @@ export async function GET(request: Request) {
   const origin = new URL(request.url).searchParams.get('origin');
   if (!origin) return bad('An `origin` is required.');
   const user = await currentUser();
-  const repo = user && linkedRepo(store(), user, origin);
+  const repo = user && (await linkedRepo(await store(), user, origin));
   if (!repo) return Response.json({ repo: null } satisfies Payload);
   const { token, lost } = await tokenFor(repo);
   const seen: Look = lost
@@ -66,7 +66,7 @@ export async function POST(request: Request) {
     return bad(`The GitHub App is not installed on ${parsed.owner}/${parsed.name}. Adjust its permissions to add it.`, 422);
   }
 
-  const repo = linkRepo(store(), userId, origin, { ...parsed, branch: null, installationId });
+  const repo = await linkRepo(await store(), userId, origin, { ...parsed, branch: null, installationId });
   return Response.json({ repo, look: seen } satisfies Payload);
 }
 
@@ -75,6 +75,6 @@ export async function DELETE(request: Request) {
   if (!origin) return bad('An `origin` is required.');
   const user = await currentUser();
   if (!user) return bad('Continue with GitHub first.', 401);
-  unlinkRepo(store(), user, origin);
+  await unlinkRepo(await store(), user, origin);
   return Response.json({ repo: null } satisfies Payload);
 }

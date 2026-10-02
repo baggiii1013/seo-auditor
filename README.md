@@ -3,6 +3,10 @@
 A Next.js front end for [nurkamol/seo-audit](https://github.com/nurkamol/seo-audit).
 
 ```bash
+# The store is Postgres. Put its URL in .env.local first:
+#   DATABASE_URL=postgres://user:password@localhost:5432/seo_auditor
+# The tables are created on first start. Coming from the old SQLite store?
+#   node --env-file=.env.local --no-warnings scripts/import-sqlite.ts
 npm run dev            # http://localhost:3000
 npm run worker         # runs "Fix with AI" jobs; leave it up beside the app
 npm start & npm run check   # the one runnable check (SITE=… BASE=… to point it elsewhere)
@@ -47,7 +51,7 @@ Because it runs under Node rather than on Cloudflare, the TLS checks are real.
 No sign-in to audit; continuing with GitHub (only to link a repository) sets
 a session cookie in that browser. PageSpeed, Search Console and crt.sh are off
 unless `ALLOW_PSI`, `ALLOW_SEARCH_CONSOLE`, `ALLOW_HOSTS` are set — they spend
-the operator's quota. Run it as one long-lived Node process with a disk; see
+the operator's quota. Run it as one long-lived Node process with a disk and a Postgres (`DATABASE_URL`); see
 PLAN.md, Phase 0.5, for every setting.
 
 Multi-site portfolio runs (`seo-audit a.com b.com`) are CLI-only here — the

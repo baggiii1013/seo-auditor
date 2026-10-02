@@ -9,7 +9,7 @@
     "worker": "bun --env-file-if-exists=.env.local --no-warnings worker.ts",
     "lint": "eslint",
     "check": "node check.mjs",
-    "test:app": "node --no-warnings --test lib/*.test.ts"
+    "test:app": "node --env-file-if-exists=.env.local --no-warnings --test lib/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
@@ -18,6 +18,7 @@
     "lucide-react": "^1.47.0",
     "next": "16.3.5",
     "ogl": "^1.0.11",
+    "postgres": "^3.4.9",
     "rate-limiter-flexible": "^11.2.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",

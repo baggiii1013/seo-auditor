@@ -3,17 +3,15 @@
 // (fixes.ts). Its own file so the web app's bundle never reaches the sandbox or
 // the model loop. Plain Node imports, as in runner.ts.
 
-import type { DatabaseSync } from 'node:sqlite';
-
 import type { Report } from '../app/types.ts';
-import { getAudit, type Check, type Job, type JobOutput, type PullRequest, type Repo } from './db.ts';
+import { getAudit, type Check, type Db, type Job, type JobOutput, type PullRequest, type Repo } from './db.ts';
 import { fixables } from './fixable.ts';
 import { installationToken } from './github-app.ts';
 import { openPullRequest } from './github-write.ts';
 
 /** A finished audit's report, parsed. */
-export function storedReport(db: DatabaseSync, id: string): Report | null {
-  const row = getAudit(db, id);
+export async function storedReport(db: Db, id: string): Promise<Report | null> {
+  const row = await getAudit(db, id);
   return row?.status === 'done' && row.result ? JSON.parse(row.result) : null;
 }
 
@@ -57,7 +55,7 @@ function describe(out: JobOutput, kept: Report | null, repo: Repo, request?: str
 
 /** Commit a fix's changes on its own branch and open the pull request. */
 export async function pull(
-  db: DatabaseSync,
+  db: Db,
   job: Pick<Job, 'id' | 'auditId' | 'createdAt' | 'input'> & { output: JobOutput },
   repo: Repo,
 ): Promise<{ ok: true; pr: PullRequest } | { ok: false; reason: string }> {
@@ -72,7 +70,7 @@ export async function pull(
     sha: job.output.base.sha,
     branch,
     files: job.output.files.map((f) => ({ path: f.path, content: f.after })),
-    ...describe(job.output, storedReport(db, job.auditId), repo, job.input.request),
+    ...describe(job.output, await storedReport(db, job.auditId), repo, job.input.request),
   });
   return written.ok ? { ok: true, pr: { number: written.number, url: written.url, branch, state: 'open' } } : written;
 }

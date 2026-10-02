@@ -24,7 +24,7 @@ export type GitState = { account: GitAccount; canConnect: boolean; canFix: boole
  *  who never continued with GitHub. */
 export async function currentUser(): Promise<number | null> {
   const token = (await cookies()).get(SESSION_COOKIE)?.value;
-  return token ? sessionUser(store(), token) : null;
+  return token ? sessionUser(await store(), token) : null;
 }
 
 // Two requests refreshing at once would both spend the same refresh token, and
@@ -36,7 +36,7 @@ const refreshing = new Map<number, Promise<string | null>>();
  *  they never connected, or the refresh was refused — which signs them out,
  *  because a token that cannot be renewed is one that is about to stop. */
 export async function userToken(userId: number): Promise<string | null> {
-  const saved = githubAccount(store(), userId);
+  const saved = await githubAccount(await store(), userId);
   if (!saved) return null;
   if (!saved.expiresAt || Date.parse(saved.expiresAt) - Date.now() > 60_000) return saved.token;
   if (!saved.refreshToken) return null;
@@ -44,12 +44,12 @@ export async function userToken(userId: number): Promise<string | null> {
   let pending = refreshing.get(userId);
   if (!pending) {
     pending = refreshUserToken(saved.refreshToken)
-      .then((fresh) => {
+      .then(async (fresh) => {
         if ('error' in fresh) {
-          forgetGithubAccount(store(), userId);
+          await forgetGithubAccount(await store(), userId);
           return null;
         }
-        saveGithubAccount(store(), userId, { login: saved.login, ...fresh });
+        await saveGithubAccount(await store(), userId, { login: saved.login, ...fresh });
         return fresh.token;
       })
       .finally(() => refreshing.delete(userId));
@@ -77,12 +77,13 @@ export async function gitState(): Promise<GitState> {
   const canFix = aiConfigured();
   try {
     const user = await currentUser();
-    const saved = user ? githubAccount(store(), user) : null;
+    const db = await store();
+    const saved = user ? await githubAccount(db, user) : null;
     return {
       account: saved ? { login: saved.login } : null,
       canConnect,
       canFix,
-      links: user ? linkedRepos(store(), user) : {},
+      links: user ? await linkedRepos(db, user) : {},
     };
   } catch (err) {
     console.error('git state unavailable:', err);

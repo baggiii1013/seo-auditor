@@ -16,7 +16,7 @@ export async function GET(request: Request) {
   const installs = await userInstallations(token);
   if (!installs.ok) return Response.json({ error: installs.reason }, { status: installs.status });
 
-  const login = githubAccount(store(), user)?.login;
+  const login = (await githubAccount(await store(), user))?.login;
   const wanted = Number(new URL(request.url).searchParams.get('installation'));
   const pick = installs.value.find((i) => i.id === wanted) ?? installs.value[0];
   if (!pick) return Response.json({ login, installations: [], installation: null, repos: [] });

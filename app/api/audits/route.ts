@@ -18,7 +18,7 @@ export async function POST(request: Request) {
   const slow = await limit('audit', request);
   if (slow) return slow;
   const ip = clientIp(request);
-  const queued = enqueue(params, ip);
+  const queued = await enqueue(params, ip);
   if ('error' in queued) return new Response(queued.error, { status: 429 });
   return Response.json(queued, { status: 202 });
 }

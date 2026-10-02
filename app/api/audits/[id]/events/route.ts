@@ -7,7 +7,7 @@ import { known, watch, type AuditEvent } from '@/lib/audits';
 
 export async function GET(request: Request, ctx: RouteContext<'/api/audits/[id]/events'>) {
   const { id } = await ctx.params;
-  if (!known(id)) return new Response('No such audit — it finished over a week ago, or never started.', { status: 404 });
+  if (!(await known(id))) return new Response('No such audit — it finished over a week ago, or never started.', { status: 404 });
 
   const after = Number.parseInt(request.headers.get('last-event-id') ?? '', 10);
   const encoder = new TextEncoder();
